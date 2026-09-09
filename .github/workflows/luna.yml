@@ -1,0 +1,43 @@
+name: Luna - prueba Internet
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "Qué quieres que Luna busque"
+        required: false
+        default: "inteligencia artificial"
+  schedule:
+    - cron: "17 8 * * *"
+      timezone: "Europe/Tirane"
+
+permissions:
+  contents: read
+
+jobs:
+  prueba-internet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Descargar Luna
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Ejecutar búsqueda real
+        env:
+          LUNA_QUERY: ${{ github.event.inputs.query || 'inteligencia artificial' }}
+        run: python luna.py
+
+      - name: Guardar resultado de la prueba
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultado-luna
+          path: resultados/ultima_busqueda.json
+          retention-days: 1
+          if-no-files-found: warn
