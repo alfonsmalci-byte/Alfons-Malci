@@ -1,4 +1,4 @@
-name: Luna - prueba Internet
+name: Luna - búsqueda y núcleo
 
 on:
   workflow_dispatch:
@@ -27,6 +27,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Probar núcleo de Luna
+        run: python -m unittest -v
 
       - name: Ejecutar búsqueda real
         env:
