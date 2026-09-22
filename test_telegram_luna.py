@@ -2,8 +2,10 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from telegram_luna import (
+    Aplicacion,
     HttpJsonError,
     MemoriaChat,
     MotorIA,
@@ -13,9 +15,53 @@ from telegram_luna import (
     cargar_env,
     cargar_offset,
     dividir_texto,
+    buscar_contexto,
+    contradice_busqueda_real,
     guardar_offset,
+    mensaje_busqueda_fallida,
     necesita_web,
+    respuesta_resultados_directos,
 )
+
+
+class _TelegramFalso:
+    def __init__(self):
+        self.enviados = []
+
+    def escribiendo(self, _chat_id):
+        pass
+
+    def enviar(self, chat_id, texto):
+        self.enviados.append((chat_id, texto))
+
+
+class _PropietarioFalso:
+    def autorizar(self, _chat_id, _tipo_chat):
+        return True, False
+
+
+class _MemoriaFalsa:
+    def __init__(self):
+        self.guardado = None
+
+    def obtener(self, _chat_id):
+        return []
+
+    def agregar(self, chat_id, pregunta, respuesta):
+        self.guardado = (chat_id, pregunta, respuesta)
+
+    def borrar(self, _chat_id):
+        pass
+
+
+def _aplicacion_falsa(motor):
+    app = Aplicacion.__new__(Aplicacion)
+    app.telegram = _TelegramFalso()
+    app.motor = motor
+    app.memoria_chat = _MemoriaFalsa()
+    app.propietario = _PropietarioFalso()
+    app.vigilante = None
+    return app
 
 
 class ConfiguracionTests(unittest.TestCase):
@@ -34,7 +80,36 @@ class ConfiguracionTests(unittest.TestCase):
 
     def test_detecta_consulta_web(self):
         self.assertTrue(necesita_web("Busca en Internet noticias de hoy"))
+        self.assertTrue(necesita_web("Hazme una búsqueda online sobre Albania"))
+        self.assertTrue(necesita_web("/buscar@LacKurbin_bot Albania"))
         self.assertFalse(necesita_web("Hola, ¿qué tal?"))
+
+    def test_limpia_comando_antes_de_buscar(self):
+        with patch("telegram_luna.search_web", return_value=([{"title": "ok"}], [])) as buscar:
+            consulta, resultados, _ = buscar_contexto(
+                "Busca en Internet noticias de Albania hoy"
+            )
+        self.assertEqual(consulta, "noticias de Albania hoy")
+        buscar.assert_called_once_with("noticias de Albania hoy")
+        self.assertEqual(resultados[0]["title"], "ok")
+
+    def test_bloquea_falsa_negacion_de_internet(self):
+        self.assertTrue(contradice_busqueda_real("No tengo acceso a Internet."))
+        self.assertTrue(contradice_busqueda_real("Abre tu navegador y obtén una API key."))
+        self.assertFalse(contradice_busqueda_real("Encontré dos noticias recientes."))
+
+    def test_fallo_no_inventa_resultados(self):
+        mensaje = mensaje_busqueda_fallida("Albania", ["gdelt devolvió 0 resultados"])
+        self.assertIn("no voy a inventar", mensaje)
+        self.assertIn("GDELT", mensaje)
+
+    def test_respuesta_directa_contiene_resultados_reales(self):
+        texto = respuesta_resultados_directos(
+            "Albania",
+            [{"title": "Titular", "snippet": "Resumen", "url": "https://x.test"}],
+        )
+        self.assertIn("Búsqueda real completada", texto)
+        self.assertIn("Titular", texto)
 
 
 class MotorIATests(unittest.TestCase):
@@ -155,6 +230,45 @@ class TelegramTests(unittest.TestCase):
         bot = TelegramBot("123:secreto", solicitante=falso)
         self.assertEqual(bot.get_me()["username"], "LunaBot")
         self.assertNotIn("123:secreto", str(llamadas[0][1]))
+
+    def test_no_llama_al_modelo_si_toda_busqueda_falla(self):
+        class MotorFalso:
+            def responder(self, _mensajes):
+                raise AssertionError("no debe llamarse")
+
+        app = _aplicacion_falsa(MotorFalso())
+        with patch(
+            "telegram_luna.buscar_contexto",
+            return_value=("Albania", [], ["fuentes sin respuesta"]),
+        ):
+            app.manejar(
+                {"chat": {"id": 1, "type": "private"}, "text": "/buscar Albania"}
+            )
+        self.assertIn("no voy a inventar", app.telegram.enviados[-1][1])
+
+    def test_sustituye_negacion_del_modelo_por_resultados(self):
+        class MotorFalso:
+            def responder(self, _mensajes):
+                return "No tengo acceso a Internet.", "groq", "modelo"
+
+        resultado = {
+            "title": "Titular comprobado",
+            "url": "https://medio.test/noticia",
+            "snippet": "Resumen comprobado",
+            "source": "gdelt",
+        }
+        app = _aplicacion_falsa(MotorFalso())
+        with patch(
+            "telegram_luna.buscar_contexto",
+            return_value=("Albania", [resultado], []),
+        ), patch("telegram_luna.cargar_memoria_privada", return_value=({}, [])):
+            app.manejar(
+                {"chat": {"id": 1, "type": "private"}, "text": "/buscar Albania"}
+            )
+        respuesta = app.telegram.enviados[-1][1]
+        self.assertIn("Titular comprobado", respuesta)
+        self.assertIn("https://medio.test/noticia", respuesta)
+        self.assertNotIn("No tengo acceso", respuesta)
 
 
 class VigilanciaTests(unittest.TestCase):

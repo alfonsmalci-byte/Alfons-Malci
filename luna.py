@@ -1,9 +1,14 @@
 import json
 import os
+import re
 import sys
 import urllib.parse
 import urllib.request
+import unicodedata
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from html import unescape
 from html.parser import HTMLParser
 
 from sabiduria_luna import (
@@ -15,6 +20,81 @@ from sabiduria_luna import (
 
 
 USER_AGENT = "Mozilla/5.0 (Luna-Agent/1.0)"
+FUENTES_BUSQUEDA = ("google-news", "gdelt", "duckduckgo", "wikipedia")
+PALABRAS_ACTUALIDAD = (
+    "actual",
+    "actualidad",
+    "ahora",
+    "hoy",
+    "latest",
+    "news",
+    "noticia",
+    "noticias",
+    "reciente",
+    "recientes",
+    "ultimo",
+    "ultimos",
+    "ultima",
+    "ultimas",
+)
+PALABRAS_RUIDO_NOTICIAS = {
+    "actual",
+    "actuales",
+    "actualidad",
+    "ahora",
+    "al",
+    "de",
+    "del",
+    "el",
+    "en",
+    "hoy",
+    "la",
+    "las",
+    "latest",
+    "los",
+    "news",
+    "noticia",
+    "noticias",
+    "sobre",
+    "un",
+    "una",
+    "ultimo",
+    "ultimos",
+    "ultima",
+    "ultimas",
+}
+
+
+def _sin_acentos(texto):
+    return "".join(
+        caracter
+        for caracter in unicodedata.normalize("NFKD", str(texto).lower())
+        if not unicodedata.combining(caracter)
+    )
+
+
+def _texto_limpio(texto):
+    texto = re.sub(r"<[^>]+>", " ", unescape(str(texto or "")))
+    return " ".join(texto.split())
+
+
+def _url_publica(url):
+    url = unescape(str(url or "")).strip()
+    parsed = urllib.parse.urlparse(url)
+    return url if parsed.scheme in ("http", "https") and parsed.netloc else ""
+
+
+def es_consulta_actual(query):
+    texto = _sin_acentos(query)
+    palabras = set(re.findall(r"[a-z0-9]+", texto))
+    return bool(palabras.intersection(PALABRAS_ACTUALIDAD))
+
+
+def limpiar_consulta_noticias(query):
+    """Quita palabras genéricas sin borrar nombres, lugares ni fechas."""
+    tokens = re.findall(r"[^\W_]+(?:[-'][^\W_]+)*", str(query), flags=re.UNICODE)
+    utiles = [token for token in tokens if _sin_acentos(token) not in PALABRAS_RUIDO_NOTICIAS]
+    return " ".join(utiles).strip() or str(query).strip()
 
 
 class DuckResultParser(HTMLParser):
@@ -45,9 +125,9 @@ class DuckResultParser(HTMLParser):
 
     def handle_data(self, data):
         if self._capture_title:
-            self._current["title"] += data.strip()
+            self._current["title"] += (" " if self._current["title"] else "") + data.strip()
         elif self._capture_snippet:
-            self._current["snippet"] += data.strip()
+            self._current["snippet"] += (" " if self._current["snippet"] else "") + data.strip()
 
 
 def fetch(url, timeout=20):
@@ -57,11 +137,12 @@ def fetch(url, timeout=20):
 
 
 def wikipedia_search(query, limit=5):
+    consulta = limpiar_consulta_noticias(query) if es_consulta_actual(query) else query
     params = urllib.parse.urlencode(
         {
             "action": "query",
             "list": "search",
-            "srsearch": query,
+            "srsearch": consulta,
             "format": "json",
             "utf8": 1,
             "srlimit": limit,
@@ -74,15 +155,85 @@ def wikipedia_search(query, limit=5):
         title = item.get("title", "")
         out.append(
             {
-                "title": title,
+                "title": _texto_limpio(title),
                 "url": "https://es.wikipedia.org/wiki/"
                 + urllib.parse.quote(title.replace(" ", "_")),
-                "snippet": item.get("snippet", "")
-                .replace('<span class="searchmatch">', "")
-                .replace("</span>", ""),
+                "snippet": _texto_limpio(item.get("snippet", "")),
                 "source": "wikipedia",
             }
         )
+    return out
+
+
+def gdelt_search(query, limit=8):
+    """Busca noticias actuales en el índice público GDELT DOC 2.0."""
+    consulta = limpiar_consulta_noticias(query)
+    params = urllib.parse.urlencode(
+        {
+            "query": consulta,
+            "mode": "artlist",
+            "maxrecords": max(10, min(int(limit) * 3, 50)),
+            "format": "json",
+            "sort": "datedesc",
+            "timespan": "7d" if es_consulta_actual(query) else "3months",
+        }
+    )
+    url = f"https://api.gdeltproject.org/api/v2/doc/doc?{params}"
+    data = json.loads(fetch(url, timeout=25))
+    out = []
+    for item in data.get("articles", []):
+        if not isinstance(item, dict):
+            continue
+        enlace = _url_publica(item.get("url"))
+        titulo = _texto_limpio(item.get("title"))
+        if not enlace or not titulo:
+            continue
+        detalles = [
+            _texto_limpio(item.get("domain")),
+            _texto_limpio(item.get("sourcecountry")),
+            _texto_limpio(item.get("seendate")),
+        ]
+        out.append(
+            {
+                "title": titulo,
+                "url": enlace,
+                "snippet": " · ".join(parte for parte in detalles if parte),
+                "source": "gdelt",
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def google_news_search(query, limit=8):
+    """Busca titulares recientes en el feed público de Google News."""
+    consulta = limpiar_consulta_noticias(query)
+    if es_consulta_actual(query):
+        consulta += " when:7d"
+    params = urllib.parse.urlencode(
+        {"q": consulta, "hl": "es", "gl": "ES", "ceid": "ES:es"}
+    )
+    xml = fetch(f"https://news.google.com/rss/search?{params}", timeout=25)
+    raiz = ET.fromstring(xml)
+    out = []
+    for item in raiz.findall(".//item"):
+        titulo = _texto_limpio(item.findtext("title"))
+        enlace = _url_publica(item.findtext("link"))
+        if not titulo or not enlace:
+            continue
+        origen = _texto_limpio(item.findtext("source"))
+        fecha = _texto_limpio(item.findtext("pubDate"))
+        out.append(
+            {
+                "title": titulo,
+                "url": enlace,
+                "snippet": " · ".join(parte for parte in (origen, fecha) if parte),
+                "source": "google-news",
+            }
+        )
+        if len(out) >= limit:
+            break
     return out
 
 
@@ -107,36 +258,103 @@ def duckduckgo_search(query, limit=5):
             parsed = urllib.parse.urlparse("https:" + url)
             query_string = urllib.parse.parse_qs(parsed.query)
             url = query_string.get("uddg", [url])[0]
-        out.append(
-            {
-                "title": item["title"],
-                "url": url,
-                "snippet": item["snippet"],
-                "source": "duckduckgo",
-            }
-        )
+        url = _url_publica(url)
+        titulo = _texto_limpio(item["title"])
+        if url and titulo:
+            out.append(
+                {
+                    "title": titulo,
+                    "url": url,
+                    "snippet": _texto_limpio(item["snippet"]),
+                    "source": "duckduckgo",
+                }
+            )
     return out
 
 
-def search_web(query):
+def _clave_resultado(resultado):
+    url = _url_publica(resultado.get("url"))
+    if url:
+        parsed = urllib.parse.urlsplit(url)
+        query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        query = [
+            (clave, valor)
+            for clave, valor in query
+            if not clave.lower().startswith("utm_")
+            and clave.lower() not in {"fbclid", "gclid"}
+        ]
+        return urllib.parse.urlunsplit(
+            (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"), urllib.parse.urlencode(query), "")
+        )
+    return _sin_acentos(resultado.get("title", ""))
+
+
+def search_web(query, limit=8, providers=None):
+    """Consulta varias fuentes a la vez y combina resultados sin duplicados."""
+    query = str(query).strip()
+    if not query:
+        return [], ["La consulta está vacía"]
+
+    proveedores = providers or {
+        "google-news": google_news_search,
+        "gdelt": gdelt_search,
+        "duckduckgo": duckduckgo_search,
+        "wikipedia": wikipedia_search,
+    }
+    orden = list(FUENTES_BUSQUEDA)
+    if not es_consulta_actual(query):
+        orden = ["duckduckgo", "wikipedia", "google-news", "gdelt"]
+    orden = [nombre for nombre in orden if nombre in proveedores]
+    if not orden:
+        return [], ["No hay fuentes de búsqueda configuradas"]
+
+    por_fuente = {}
     errors = []
-    try:
-        resultados = duckduckgo_search(query)
-        if resultados:
-            return resultados, errors
-        errors.append("DuckDuckGo devolvió 0 resultados")
-    except Exception as error:
-        errors.append(f"DuckDuckGo falló: {type(error).__name__}: {error}")
+    with ThreadPoolExecutor(max_workers=len(orden), thread_name_prefix="luna-web") as executor:
+        futuros = {
+            executor.submit(proveedores[nombre], query, max(5, limit)): nombre
+            for nombre in orden
+        }
+        for futuro in as_completed(futuros):
+            nombre = futuros[futuro]
+            try:
+                resultados = futuro.result()
+                por_fuente[nombre] = resultados if isinstance(resultados, list) else []
+                if not por_fuente[nombre]:
+                    errors.append(f"{nombre} devolvió 0 resultados")
+            except Exception as error:
+                por_fuente[nombre] = []
+                errors.append(f"{nombre} falló: {type(error).__name__}: {error}")
 
-    try:
-        resultados = wikipedia_search(query)
-        if resultados:
-            return resultados, errors
-        errors.append("Wikipedia devolvió 0 resultados")
-    except Exception as error:
-        errors.append(f"Wikipedia falló: {type(error).__name__}: {error}")
-
-    return [], errors
+    combinados = []
+    vistos = set()
+    profundidad = max((len(por_fuente.get(nombre, [])) for nombre in orden), default=0)
+    for indice in range(profundidad):
+        for nombre in orden:
+            resultados_fuente = por_fuente.get(nombre, [])
+            if indice >= len(resultados_fuente):
+                continue
+            item = resultados_fuente[indice]
+            if not isinstance(item, dict):
+                continue
+            titulo = _texto_limpio(item.get("title"))
+            url = _url_publica(item.get("url"))
+            if not titulo or not url:
+                continue
+            normalizado = {
+                "title": titulo,
+                "url": url,
+                "snippet": _texto_limpio(item.get("snippet")),
+                "source": str(item.get("source") or nombre),
+            }
+            clave = _clave_resultado(normalizado)
+            if not clave or clave in vistos:
+                continue
+            vistos.add(clave)
+            combinados.append(normalizado)
+            if len(combinados) >= limit:
+                return combinados, errors
+    return combinados, errors
 
 
 def mostrar_mente():

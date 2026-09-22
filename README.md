@@ -25,6 +25,11 @@ Para hacer una búsqueda:
 python luna.py "qué quieres investigar"
 ```
 
+Luna consulta en paralelo cuatro fuentes gratuitas y sin claves adicionales:
+Google News y GDELT para noticias recientes, DuckDuckGo para resultados
+generales y la API de Wikipedia para contexto. Combina los resultados, elimina
+duplicados y conserva los enlaces originales.
+
 El informe queda en `resultados/ultima_busqueda.json` e incluye la cobertura de
 fuentes. Una cobertura alta significa que aparecieron varios orígenes; no
 garantiza por sí sola que todos digan la verdad.
@@ -60,6 +65,17 @@ El puente `telegram_luna.py`:
 - guarda la conversación únicamente en `memoria_telegram.json` dentro del móvil;
 - vincula el bot al primer chat privado que le escriba y rechaza otros usuarios;
 - puede buscar en Internet con `/buscar tema` o cuando detecta una consulta actual.
+
+Ejemplo de búsqueda real desde Telegram:
+
+```text
+/buscar noticias de Albania hoy
+```
+
+Cuando hay resultados, Luna muestra `🔎 Búsqueda real completada`, resume solo
+el contexto recuperado y añade los enlaces. Si fallan todas las fuentes, informa
+del fallo y no deja que el modelo improvise datos ni instrucciones para crear
+claves de Bing o Google.
 
 El orden inicial prioriza Groq, Gemini, Cerebras y OpenRouter. Si todos fallan,
 puede usar DeepSeek u OpenAI; esas dos APIs podrían consumir saldo según la

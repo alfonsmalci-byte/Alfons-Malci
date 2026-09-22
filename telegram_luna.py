@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -614,42 +615,93 @@ def dividir_texto(texto: str, limite: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
 
 
 def necesita_web(texto: str) -> bool:
-    texto = texto.lower()
-    patrones = (
-        "/buscar",
-        "busca en internet",
-        "noticias",
-        "hoy",
-        "ahora mismo",
-        "actualizado",
-        "último",
-        "ultima",
-        "última",
-        "precio actual",
-        "clima",
-        "tiempo en ",
+    normalizado = "".join(
+        caracter
+        for caracter in unicodedata.normalize("NFKD", texto.lower())
+        if not unicodedata.combining(caracter)
     )
-    return any(patron in texto for patron in patrones)
+    if re.match(r"^/buscar(?:@\w+)?(?:\s|$)", normalizado):
+        return True
+    patrones = (
+        r"\b(?:busca|buscar|buscame|investiga|investigar)\b",
+        r"\b(?:internet|la web|online)\b",
+        r"\b(?:noticia|noticias|actualidad|ultima hora)\b",
+        r"\b(?:hoy|ahora mismo|actualizado|actualizada|reciente)\b",
+        r"\b(?:precio actual|clima|tiempo en)\b",
+    )
+    return any(re.search(patron, normalizado) for patron in patrones)
 
 
 def buscar_contexto(texto: str) -> tuple[str, list[dict], list[str]]:
-    consulta = texto
-    if texto.lower().startswith("/buscar"):
-        consulta = texto[len("/buscar") :].strip()
+    consulta = re.sub(
+        r"^/buscar(?:@\w+)?\s*",
+        "",
+        texto,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+    consulta = re.sub(
+        r"^(?:busca|buscar|búscame|buscame|investiga|investigar)"
+        r"(?:\s+en\s+(?:internet|la\s+web|web|online))?\s*[:,;-]?\s*",
+        "",
+        consulta,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
     if not consulta:
         return "", [], ["Falta escribir qué quieres buscar."]
     resultados, errores = search_web(consulta)
-    return consulta, resultados[:5], errores
+    return consulta, resultados[:8], errores
 
 
 def fuentes_texto(resultados: list[dict]) -> str:
     lineas = []
-    for resultado in resultados[:4]:
+    for resultado in resultados[:5]:
         titulo = str(resultado.get("title", "Fuente")).strip() or "Fuente"
         url = str(resultado.get("url", "")).strip()
+        origen = str(resultado.get("source", "web")).strip()
         if url:
-            lineas.append(f"- {titulo}: {url}")
+            lineas.append(f"- [{origen}] {titulo}: {url}")
     return "\n".join(lineas)
+
+
+def mensaje_busqueda_fallida(consulta: str, errores: list[str]) -> str:
+    detalle = "; ".join(str(error) for error in errores[:3])
+    mensaje = (
+        f"⚠️ No pude obtener resultados reales para «{consulta}». "
+        "Probé Google News, GDELT, DuckDuckGo y Wikipedia; no voy a inventar una respuesta."
+    )
+    if detalle:
+        mensaje += "\n\nDetalle: " + detalle
+    mensaje += "\n\nPrueba de nuevo dentro de un momento o concreta más la búsqueda."
+    return mensaje
+
+
+def respuesta_resultados_directos(consulta: str, resultados: list[dict]) -> str:
+    lineas = [f"🔎 Búsqueda real completada para «{consulta}». Estos son los resultados:"]
+    for indice, resultado in enumerate(resultados[:5], 1):
+        titulo = str(resultado.get("title", "Resultado")).strip() or "Resultado"
+        resumen = str(resultado.get("snippet", "")).strip()
+        lineas.append(f"\n{indice}. {titulo}" + (f"\n{resumen}" if resumen else ""))
+    return "\n".join(lineas)
+
+
+def contradice_busqueda_real(respuesta: str) -> bool:
+    normalizado = "".join(
+        caracter
+        for caracter in unicodedata.normalize("NFKD", respuesta.lower())
+        if not unicodedata.combining(caracter)
+    )
+    frases = (
+        "no puedo realizar busquedas",
+        "no puedo hacer busquedas",
+        "no tengo acceso a internet",
+        "no puedo navegar por internet",
+        "abre tu navegador",
+        "crea un proyecto en google cloud",
+        "obten una api key",
+    )
+    return any(frase in normalizado for frase in frases)
 
 
 AYUDA = """Luna está conectada.
@@ -734,19 +786,34 @@ class Aplicacion:
         resultados_web: list[dict] = []
         errores_web: list[str] = []
         pregunta = texto
-        if necesita_web(texto):
+        solicitud_web = necesita_web(texto)
+        if solicitud_web:
             pregunta, resultados_web, errores_web = buscar_contexto(texto)
             if not pregunta:
                 self.telegram.enviar(chat_id, errores_web[0])
+                return
+            if not resultados_web:
+                self.telegram.enviar(
+                    chat_id,
+                    mensaje_busqueda_fallida(pregunta, errores_web),
+                )
                 return
 
         memoria_privada, advertencias = cargar_memoria_privada(ROOT / "memoria_privada.json")
         prompt = construir_prompt(memoria=memoria_privada, contexto_web=resultados_web)
         prompt += (
             "\n\nResponde en el idioma del usuario, primero con la conclusión y después con "
-            "los pasos mínimos. Estás hablando por Telegram. No afirmes que consultaste "
-            "Internet si CONTEXTO WEB está vacío."
+            "los pasos mínimos. Estás hablando por Telegram."
         )
+        if resultados_web:
+            prompt += (
+                "\nLa búsqueda real ya fue ejecutada y sus resultados están en CONTEXTO WEB. "
+                "Responde usando únicamente esos datos para las afirmaciones actuales. Resume "
+                "los hallazgos, distingue lo incierto y no expliques cómo buscar, no pidas una "
+                "API key y no digas que careces de acceso a Internet."
+            )
+        else:
+            prompt += " No afirmes que consultaste Internet porque CONTEXTO WEB está vacío."
         mensajes = [{"role": "system", "content": prompt}]
         mensajes.extend(self.memoria_chat.obtener(chat_id))
         mensajes.append({"role": "user", "content": pregunta})
@@ -762,11 +829,13 @@ class Aplicacion:
             return
 
         if resultados_web:
+            if contradice_busqueda_real(respuesta):
+                respuesta = respuesta_resultados_directos(pregunta, resultados_web)
+            else:
+                respuesta = "🔎 Búsqueda real completada.\n\n" + respuesta
             fuentes = fuentes_texto(resultados_web)
             if fuentes:
                 respuesta += "\n\nFuentes consultadas:\n" + fuentes
-        elif necesita_web(texto) and errores_web:
-            respuesta += "\n\n⚠️ Esta vez la búsqueda web falló; la respuesta procede del modelo."
 
         self.memoria_chat.agregar(chat_id, pregunta, respuesta)
         self.telegram.enviar(chat_id, respuesta)
