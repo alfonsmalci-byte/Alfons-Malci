@@ -5,3 +5,6 @@ __pycache__/
 secrets.*
 memoria*.json
 resultados/
+.telegram_owner
+.luna_telegram.lock
+.memoria_telegram.tmp

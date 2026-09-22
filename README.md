@@ -47,9 +47,39 @@ sube al repositorio. No guardes allí contraseñas ni tokens.
 ## Límite real de esta versión
 
 Este núcleo transmite reglas y método de trabajo, no copia el modelo interno de
-ChatGPT ni sus pesos. Luna todavía no genera respuestas completas con un modelo
-de lenguaje; queda preparada para conectarlo después mediante una API y un
-secreto seguro.
+ChatGPT ni sus pesos. Las respuestas de Telegram se generan mediante las APIs
+que Alfons tenga configuradas en su `.env` privado.
+
+## Telegram en Termux
+
+El puente `telegram_luna.py`:
+
+- conecta el bot de Telegram con Luna;
+- usa Groq, Gemini, Cerebras, OpenRouter, DeepSeek y OpenAI en modo automático;
+- cambia al siguiente proveedor cuando uno falla;
+- guarda la conversación únicamente en `memoria_telegram.json` dentro del móvil;
+- vincula el bot al primer chat privado que le escriba y rechaza otros usuarios;
+- puede buscar en Internet con `/buscar tema` o cuando detecta una consulta actual.
+
+El orden inicial prioriza Groq, Gemini, Cerebras y OpenRouter. Si todos fallan,
+puede usar DeepSeek u OpenAI; esas dos APIs podrían consumir saldo según la
+cuenta. Se puede cambiar el orden con `LUNA_PROVIDERS` dentro del `.env`.
+
+Comprobar la configuración sin generar texto ni consumir una respuesta de IA:
+
+```bash
+python telegram_luna.py --check
+```
+
+Iniciar el bot:
+
+```bash
+python telegram_luna.py
+```
+
+Termux debe permanecer abierto durante la primera prueba. Para detenerlo, pulsa
+`CTRL+C`. Nunca publiques `.env`, `.telegram_owner`, `memoria_privada.json` ni
+`memoria_telegram.json`.
 
 ## GitHub Actions
 
