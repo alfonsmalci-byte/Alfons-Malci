@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -29,6 +30,7 @@ ROOT = Path(__file__).resolve().parent
 ENV_FILE = ROOT / ".env"
 OWNER_FILE = ROOT / ".telegram_owner"
 CHAT_MEMORY_FILE = ROOT / "memoria_telegram.json"
+OFFSET_FILE = ROOT / "memoria_telegram_offset.json"
 LOCK_FILE = ROOT / ".luna_telegram.lock"
 MAX_USER_CHARS = 6_000
 MAX_HISTORY_MESSAGES = 16
@@ -237,6 +239,7 @@ class MotorIA:
         self._modelos_cache: dict[str, list[str]] = {}
         self.ultimo_proveedor = "ninguno"
         self.ultimo_modelo = "ninguno"
+        self.ultima_salud: dict[str, tuple[bool, str]] = {}
         try:
             self.max_tokens = max(128, min(2_000, int(entorno.get("LUNA_MAX_TOKENS", "700"))))
         except ValueError:
@@ -341,6 +344,27 @@ class MotorIA:
         resumen = "; ".join(errores[-8:]) or "no hay proveedores configurados"
         raise LunaError("Ningún proveedor pudo responder. " + resumen)
 
+    def comprobar_salud(self) -> dict[str, tuple[bool, str]]:
+        """Comprueba autenticación y red sin generar texto ni gastar tokens."""
+        estados: dict[str, tuple[bool, str]] = {}
+        for nombre in self.configurados:
+            proveedor = PROVEEDORES[nombre]
+            try:
+                datos = self.solicitante(
+                    proveedor.base_url.rstrip("/") + "/models",
+                    cabeceras=self._cabeceras(proveedor),
+                    timeout=20,
+                )
+                if not isinstance(datos.get("data"), list):
+                    raise LunaError("respuesta de modelos inesperada")
+                estados[nombre] = (True, "activo")
+            except HttpJsonError as error:
+                estados[nombre] = (False, f"HTTP {error.status}")
+            except LunaError as error:
+                estados[nombre] = (False, str(error)[:100])
+        self.ultima_salud = estados
+        return estados
+
 
 class MemoriaChat:
     def __init__(self, ruta: Path = CHAT_MEMORY_FILE):
@@ -411,6 +435,24 @@ class Propietario:
         return self.chat_id == chat_id, False
 
 
+def cargar_offset(ruta: Path = OFFSET_FILE) -> int | None:
+    if not ruta.exists():
+        return None
+    try:
+        valor = int(ruta.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return valor if valor >= 0 else None
+
+
+def guardar_offset(offset: int, ruta: Path = OFFSET_FILE) -> None:
+    temporal = ruta.with_name(".memoria_telegram_offset.tmp")
+    temporal.write_text(str(offset), encoding="utf-8")
+    os.chmod(temporal, 0o600)
+    os.replace(temporal, ruta)
+    os.chmod(ruta, 0o600)
+
+
 class TelegramBot:
     def __init__(self, token: str, solicitante=pedir_json):
         if not token or ":" not in token:
@@ -450,6 +492,109 @@ class TelegramBot:
     def enviar(self, chat_id: int, texto: str) -> None:
         for parte in dividir_texto(texto):
             self.llamar("sendMessage", {"chat_id": chat_id, "text": parte})
+
+
+class Vigilante:
+    """Vigila las APIs en segundo plano y notifica cambios de estado."""
+
+    def __init__(
+        self,
+        telegram: TelegramBot,
+        motor: MotorIA,
+        propietario: Propietario,
+        intervalo: int = 600,
+    ):
+        self.telegram = telegram
+        self.motor = motor
+        self.propietario = propietario
+        self.intervalo = max(120, min(3_600, int(intervalo)))
+        self.estados: dict[str, tuple[bool, str]] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _avisar(self, texto: str) -> None:
+        chat_id = self.propietario.chat_id
+        if chat_id is None:
+            return
+        try:
+            self.telegram.enviar(chat_id, texto)
+        except LunaError as error:
+            print(f"⚠️ Aviso pendiente: {error}", file=sys.stderr)
+
+    def revisar(self, notificar: bool = True) -> dict[str, tuple[bool, str]]:
+        nuevos = self.motor.comprobar_salud()
+        with self._lock:
+            anteriores = dict(self.estados)
+            self.estados = dict(nuevos)
+
+        if not notificar:
+            return nuevos
+
+        if not anteriores:
+            activos = [nombre for nombre, (ok, _) in nuevos.items() if ok]
+            caidos = [nombre for nombre, (ok, _) in nuevos.items() if not ok]
+            if caidos:
+                self._avisar(
+                    "⚠️ Vigilancia iniciada. No responden: "
+                    + ", ".join(caidos)
+                    + ". Luna cambiará automáticamente a los que estén activos."
+                )
+            else:
+                self._avisar(
+                    f"🟢 Vigilancia activa: {len(activos)}/{len(nuevos)} proveedores responden."
+                )
+            return nuevos
+
+        for nombre, (ok, detalle) in nuevos.items():
+            anterior = anteriores.get(nombre)
+            if anterior is None or anterior[0] == ok:
+                continue
+            if ok:
+                self._avisar(f"✅ {nombre} volvió a funcionar.")
+            else:
+                self._avisar(
+                    f"⚠️ {nombre} dejó de responder ({detalle}). Luna usará otro proveedor."
+                )
+        return nuevos
+
+    def resumen(self) -> str:
+        with self._lock:
+            estados = dict(self.estados)
+        if not estados:
+            return "⏳ Vigilancia: preparando primera comprobación"
+        lineas = ["🛡️ Vigilancia de APIs:"]
+        for nombre in self.motor.configurados:
+            ok, detalle = estados.get(nombre, (False, "sin comprobar"))
+            lineas.append(f"{'✅' if ok else '❌'} {nombre}: {detalle}")
+        return "\n".join(lineas)
+
+    def _bucle(self) -> None:
+        if self._stop.wait(8):
+            return
+        while not self._stop.is_set():
+            try:
+                self.revisar(notificar=True)
+            except Exception as error:
+                print(
+                    f"⚠️ Vigilancia controló un error: {type(error).__name__}",
+                    file=sys.stderr,
+                )
+            if self._stop.wait(self.intervalo):
+                return
+
+    def iniciar(self) -> None:
+        self._thread = threading.Thread(
+            target=self._bucle,
+            name="vigilante-luna",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def detener(self) -> None:
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2)
 
 
 def dividir_texto(texto: str, limite: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
@@ -512,6 +657,7 @@ AYUDA = """Luna está conectada.
 Escríbeme normalmente.
 /buscar tema — consulta Internet y responde con fuentes
 /estado — muestra conexión y último proveedor
+/vigilar — comprueba ahora todas las APIs
 /reiniciar — borra esta conversación local
 /ayuda — muestra estos comandos"""
 
@@ -522,16 +668,23 @@ class Aplicacion:
         self.motor = motor
         self.memoria_chat = MemoriaChat()
         self.propietario = Propietario()
+        self.vigilante: Vigilante | None = None
+
+    def conectar_vigilante(self, vigilante: Vigilante) -> None:
+        self.vigilante = vigilante
 
     def _estado(self) -> str:
         configurados = ", ".join(self.motor.configurados) or "ninguno"
-        return (
+        base = (
             "✅ Telegram conectado\n"
             f"🧠 Proveedores configurados: {configurados}\n"
             f"🔄 Último proveedor: {self.motor.ultimo_proveedor}\n"
             f"🤖 Último modelo: {self.motor.ultimo_modelo}\n"
             "🔒 Memoria y claves: solo en Termux"
         )
+        if self.vigilante:
+            base += "\n\n" + self.vigilante.resumen()
+        return base
 
     def manejar(self, mensaje: dict) -> None:
         chat = mensaje.get("chat") or {}
@@ -560,6 +713,14 @@ class Aplicacion:
             return
         if comando in ("/estado", "/proveedores"):
             self.telegram.enviar(chat_id, self._estado())
+            return
+        if comando == "/vigilar":
+            if not self.vigilante:
+                self.telegram.enviar(chat_id, "⏳ La vigilancia todavía está iniciándose.")
+                return
+            self.telegram.escribiendo(chat_id)
+            self.vigilante.revisar(notificar=False)
+            self.telegram.enviar(chat_id, self.vigilante.resumen())
             return
         if comando in ("/reiniciar", "/borrar_conversacion"):
             self.memoria_chat.borrar(chat_id)
@@ -613,12 +774,14 @@ class Aplicacion:
 
 
 def adquirir_bloqueo():
-    archivo = LOCK_FILE.open("w", encoding="utf-8")
+    archivo = LOCK_FILE.open("a+", encoding="utf-8")
     try:
         fcntl.flock(archivo.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         archivo.close()
         raise LunaError("Ya hay otra copia de telegram_luna.py ejecutándose") from None
+    archivo.seek(0)
+    archivo.truncate()
     archivo.write(str(os.getpid()))
     archivo.flush()
     return archivo
@@ -643,20 +806,49 @@ def ejecutar(check_only: bool = False) -> int:
     bloqueo = adquirir_bloqueo()
     telegram.preparar_long_polling()
     aplicacion = Aplicacion(telegram, motor)
+    try:
+        intervalo = int(entorno.get("LUNA_HEALTH_INTERVAL", "600"))
+    except ValueError:
+        intervalo = 600
+    vigilante = Vigilante(telegram, motor, aplicacion.propietario, intervalo)
+    aplicacion.conectar_vigilante(vigilante)
+    vigilante.iniciar()
     print("✅ Luna Telegram iniciada")
     print("📩 Esperando mensajes... Pulsa CTRL+C para cerrar.")
 
-    offset: int | None = None
+    if aplicacion.propietario.chat_id is not None:
+        try:
+            telegram.enviar(
+                aplicacion.propietario.chat_id,
+                "♻️ Luna está activa como servicio. Si una API falla o se recupera, te avisaré aquí.",
+            )
+        except LunaError:
+            pass
+
+    offset = cargar_offset()
     espera = 2
+    fallo_telegram_desde: float | None = None
     try:
         while True:
             try:
                 actualizaciones = telegram.actualizaciones(offset)
                 espera = 2
+                if fallo_telegram_desde is not None:
+                    minutos = max(1, round((time.monotonic() - fallo_telegram_desde) / 60))
+                    if aplicacion.propietario.chat_id is not None:
+                        try:
+                            telegram.enviar(
+                                aplicacion.propietario.chat_id,
+                                f"✅ Telegram/Internet volvió después de unos {minutos} min.",
+                            )
+                        except LunaError:
+                            pass
+                    fallo_telegram_desde = None
                 for actualizacion in actualizaciones:
                     update_id = actualizacion.get("update_id")
+                    siguiente_offset = offset
                     if isinstance(update_id, int):
-                        offset = update_id + 1
+                        siguiente_offset = update_id + 1
                     mensaje = actualizacion.get("message")
                     if isinstance(mensaje, dict):
                         try:
@@ -668,11 +860,16 @@ def ejecutar(check_only: bool = False) -> int:
                                 f"⚠️ Error interno controlado: {type(error).__name__}",
                                 file=sys.stderr,
                             )
+                    if siguiente_offset is not None:
+                        offset = siguiente_offset
+                        guardar_offset(offset)
             except HttpJsonError as error:
                 if error.status == 409:
                     raise LunaError(
                         "Telegram detectó otra copia del bot en ejecución (HTTP 409)"
                     ) from None
+                if fallo_telegram_desde is None:
+                    fallo_telegram_desde = time.monotonic()
                 print(
                     f"⚠️ Telegram HTTP {error.status}; reintento en {espera}s",
                     file=sys.stderr,
@@ -680,10 +877,13 @@ def ejecutar(check_only: bool = False) -> int:
                 time.sleep(espera)
                 espera = min(espera * 2, 30)
             except LunaError as error:
+                if fallo_telegram_desde is None:
+                    fallo_telegram_desde = time.monotonic()
                 print(f"⚠️ {error}; reintento en {espera}s", file=sys.stderr)
                 time.sleep(espera)
                 espera = min(espera * 2, 30)
     finally:
+        vigilante.detener()
         bloqueo.close()
 
 

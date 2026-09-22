@@ -8,3 +8,4 @@ resultados/
 .telegram_owner
 .luna_telegram.lock
 .memoria_telegram.tmp
+.memoria_telegram_offset.tmp

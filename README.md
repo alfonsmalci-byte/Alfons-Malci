@@ -77,9 +77,36 @@ Iniciar el bot:
 python telegram_luna.py
 ```
 
-Termux debe permanecer abierto durante la primera prueba. Para detenerlo, pulsa
-`CTRL+C`. Nunca publiques `.env`, `.telegram_owner`, `memoria_privada.json` ni
-`memoria_telegram.json`.
+Durante la primera prueba puedes detenerlo con `CTRL+C`. Nunca publiques `.env`,
+`.telegram_owner`, `memoria_privada.json` ni `memoria_telegram.json`.
+
+## Mantener Luna activa
+
+El instalador incluido usa `termux-services` para ejecutar Luna en segundo plano
+y reiniciarla si el proceso falla:
+
+```bash
+bash instalar_servicio_termux.sh
+```
+
+Comprobar el servicio y ver su registro:
+
+```bash
+sv status luna-telegram
+tail -f "$PREFIX/var/log/sv/luna-telegram/current"
+```
+
+En Telegram, `/vigilar` comprueba todas las APIs sin generar texto. Luna avisa
+en el chat cuando un proveedor deja de responder y cuando se recupera. El
+intervalo predeterminado es de 10 minutos; se puede cambiar en `.env`, por
+ejemplo con `LUNA_HEALTH_INTERVAL=300`.
+
+Para arrancar después de reiniciar Android instala
+[Termux:Boot](https://github.com/termux/termux-boot), ábrelo una vez y deja
+Termux con batería **Sin restricciones**. Cerrar una ventana de Termux no detiene
+el servicio, pero Android sí puede impedir todo reinicio después de pulsar
+**Forzar detención**; ninguna aplicación local puede avisar mientras está
+forzosamente detenida.
 
 ## GitHub Actions
 

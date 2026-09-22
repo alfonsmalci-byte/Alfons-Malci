@@ -9,8 +9,11 @@ from telegram_luna import (
     MotorIA,
     Propietario,
     TelegramBot,
+    Vigilante,
     cargar_env,
+    cargar_offset,
     dividir_texto,
+    guardar_offset,
     necesita_web,
 )
 
@@ -86,6 +89,28 @@ class MotorIATests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "no hay proveedores configurados"):
             motor.responder([{"role": "user", "content": "hola"}])
 
+    def test_salud_detecta_api_activa_y_caida_sin_generar(self):
+        llamadas = []
+
+        def falso(url, **kwargs):
+            llamadas.append((url, kwargs))
+            if "api.groq.com" in url:
+                return {"data": [{"id": "modelo-chat"}]}
+            raise HttpJsonError(503, "temporalmente fuera de servicio")
+
+        motor = MotorIA(
+            {
+                "GROQ_API_KEY": "secreto-a",
+                "GEMINI_API_KEY": "secreto-b",
+                "LUNA_PROVIDERS": "groq,gemini",
+            },
+            solicitante=falso,
+        )
+        estados = motor.comprobar_salud()
+        self.assertEqual(estados["groq"], (True, "activo"))
+        self.assertEqual(estados["gemini"], (False, "HTTP 503"))
+        self.assertTrue(all(item[1].get("cuerpo") is None for item in llamadas))
+
 
 class MemoriaYPropietarioTests(unittest.TestCase):
     def test_memoria_persiste_y_se_borra(self):
@@ -111,6 +136,13 @@ class MemoriaYPropietarioTests(unittest.TestCase):
             propietario = Propietario(Path(temporal) / ".telegram_owner")
             self.assertEqual(propietario.autorizar(-100, "group"), (False, False))
 
+    def test_offset_persiste_con_permisos_privados(self):
+        with tempfile.TemporaryDirectory() as temporal:
+            ruta = Path(temporal) / "memoria_telegram_offset.json"
+            guardar_offset(321, ruta)
+            self.assertEqual(cargar_offset(ruta), 321)
+            self.assertEqual(os.stat(ruta).st_mode & 0o777, 0o600)
+
 
 class TelegramTests(unittest.TestCase):
     def test_get_me_no_expone_token_en_cuerpo(self):
@@ -123,6 +155,41 @@ class TelegramTests(unittest.TestCase):
         bot = TelegramBot("123:secreto", solicitante=falso)
         self.assertEqual(bot.get_me()["username"], "LunaBot")
         self.assertNotIn("123:secreto", str(llamadas[0][1]))
+
+
+class VigilanciaTests(unittest.TestCase):
+    def test_avisa_caida_y_recuperacion(self):
+        class TelegramFalso:
+            def __init__(self):
+                self.enviados = []
+
+            def enviar(self, chat_id, texto):
+                self.enviados.append((chat_id, texto))
+
+        class MotorFalso:
+            configurados = ["groq"]
+
+            def __init__(self):
+                self.estados = [
+                    {"groq": (True, "activo")},
+                    {"groq": (False, "HTTP 503")},
+                    {"groq": (True, "activo")},
+                ]
+
+            def comprobar_salud(self):
+                return self.estados.pop(0)
+
+        telegram = TelegramFalso()
+        propietario = Propietario(Path("/ruta/que/no/existe"))
+        propietario.chat_id = 77
+        vigilante = Vigilante(telegram, MotorFalso(), propietario)
+        vigilante.revisar()
+        vigilante.revisar()
+        vigilante.revisar()
+        textos = [texto for _, texto in telegram.enviados]
+        self.assertTrue(any("Vigilancia activa" in texto for texto in textos))
+        self.assertTrue(any("dejó de responder" in texto for texto in textos))
+        self.assertTrue(any("volvió a funcionar" in texto for texto in textos))
 
 
 if __name__ == "__main__":
