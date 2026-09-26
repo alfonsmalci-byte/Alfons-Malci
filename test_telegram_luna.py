@@ -1,6 +1,8 @@
+import io
 import os
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,11 +18,15 @@ from telegram_luna import (
     cargar_offset,
     dividir_texto,
     buscar_contexto,
+    comprobar_busquedas_reales,
+    comprobar_nueve_conexiones,
     contradice_busqueda_real,
+    extraer_texto_documento,
     guardar_offset,
     mensaje_busqueda_fallida,
     necesita_web,
     respuesta_resultados_directos,
+    _puntuacion_modelo,
 )
 
 
@@ -54,6 +60,17 @@ class _MemoriaFalsa:
         pass
 
 
+class _RendimientoFalso:
+    def ordenar(self, nombres):
+        return list(nombres)
+
+    def registrar(self, *_args, **_kwargs):
+        pass
+
+    def resumen(self, nombres):
+        return ", ".join(nombres)
+
+
 def _aplicacion_falsa(motor):
     app = Aplicacion.__new__(Aplicacion)
     app.telegram = _TelegramFalso()
@@ -69,7 +86,9 @@ class ConfiguracionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporal:
             ruta = Path(temporal) / ".env"
             ruta.write_text('A="uno"\nexport B=dos\n# comentario\n', encoding="utf-8")
-            valores = cargar_env(ruta)
+            with patch.dict(os.environ, {"A": "valor-viejo"}):
+                valores = cargar_env(ruta)
+                self.assertEqual(os.environ["A"], "uno")
         self.assertEqual(valores, {"A": "uno", "B": "dos"})
 
     def test_divide_respuesta_para_telegram(self):
@@ -101,7 +120,7 @@ class ConfiguracionTests(unittest.TestCase):
     def test_fallo_no_inventa_resultados(self):
         mensaje = mensaje_busqueda_fallida("Albania", ["gdelt devolvió 0 resultados"])
         self.assertIn("no voy a inventar", mensaje)
-        self.assertIn("GDELT", mensaje)
+        self.assertIn("gdelt", mensaje)
 
     def test_respuesta_directa_contiene_resultados_reales(self):
         texto = respuesta_resultados_directos(
@@ -113,6 +132,63 @@ class ConfiguracionTests(unittest.TestCase):
 
 
 class MotorIATests(unittest.TestCase):
+    def test_comprueba_exactamente_las_nueve_conexiones(self):
+        entorno = {
+            "GROQ_API_KEY": "a",
+            "GEMINI_API_KEY": "b",
+            "CEREBRAS_API_KEY": "c",
+            "OPENROUTER_API_KEY": "d",
+            "DEEPSEEK_API_KEY": "e",
+            "OPENAI_API_KEY": "f",
+            "TELEGRAM_TOKEN": "1:t",
+            "TAVILY_API_KEY": "g",
+            "BRAVE_SEARCH_API_KEY": "h",
+        }
+        motor = MotorIA(entorno, rendimiento=_RendimientoFalso())
+        salud = {
+            nombre: (True, "activo")
+            for nombre in ("groq", "gemini", "cerebras", "openrouter", "deepseek", "openai")
+        }
+        with patch.object(motor, "comprobar_salud", return_value=salud), patch(
+            "telegram_luna.comprobar_busquedas_reales",
+            return_value={
+                "tavily": (True, "búsqueda real"),
+                "brave": (True, "búsqueda real"),
+            },
+        ):
+            estados = comprobar_nueve_conexiones(
+                entorno,
+                motor,
+                telegram_ok=True,
+            )
+        self.assertEqual(len(estados), 9)
+        self.assertTrue(all(ok for ok, _detalle in estados.values()))
+
+    def test_busquedas_reales_prueban_tavily_y_brave_una_vez(self):
+        entorno = {
+            "TAVILY_API_KEY": "tavily",
+            "BRAVE_SEARCH_API_KEY": "brave",
+        }
+        resultado = [{"title": "Python", "url": "https://python.org"}]
+        with patch("telegram_luna.tavily_search", return_value=resultado) as tavily, patch(
+            "telegram_luna.brave_search", return_value=resultado
+        ) as brave:
+            estados = comprobar_busquedas_reales(entorno)
+        self.assertTrue(estados["tavily"][0])
+        self.assertTrue(estados["brave"][0])
+        tavily.assert_called_once()
+        brave.assert_called_once()
+
+    def test_modelo_estable_mas_nuevo_recibe_mayor_puntuacion(self):
+        self.assertGreater(
+            _puntuacion_modelo("gemini", "gemini-4.0-flash"),
+            _puntuacion_modelo("gemini", "gemini-2.5-flash"),
+        )
+        self.assertGreater(
+            _puntuacion_modelo("openai", "gpt-6-mini"),
+            _puntuacion_modelo("openai", "gpt-5-mini"),
+        )
+
     def test_cambia_de_proveedor_si_el_primero_falla(self):
         llamadas = []
 
@@ -131,6 +207,7 @@ class MotorIATests(unittest.TestCase):
                 "LUNA_PROVIDERS": "groq,gemini",
             },
             solicitante=falso,
+            rendimiento=_RendimientoFalso(),
         )
         texto, proveedor, _ = motor.responder([{"role": "user", "content": "hola"}])
         self.assertEqual(texto, "respuesta real")
@@ -152,6 +229,7 @@ class MotorIATests(unittest.TestCase):
         motor = MotorIA(
             {"OPENROUTER_API_KEY": "secreto", "LUNA_PROVIDERS": "openrouter"},
             solicitante=falso,
+            rendimiento=_RendimientoFalso(),
         )
         texto, _, _ = motor.responder([{"role": "user", "content": "hola"}])
         self.assertEqual(texto, "ok")
@@ -159,7 +237,11 @@ class MotorIATests(unittest.TestCase):
         self.assertIn("max_tokens", cuerpos[1])
 
     def test_informa_cuando_no_hay_claves(self):
-        motor = MotorIA({"LUNA_PROVIDERS": "groq"}, solicitante=lambda *_a, **_k: {})
+        motor = MotorIA(
+            {"LUNA_PROVIDERS": "groq"},
+            solicitante=lambda *_a, **_k: {},
+            rendimiento=_RendimientoFalso(),
+        )
         self.assertEqual(motor.configurados, [])
         with self.assertRaisesRegex(Exception, "no hay proveedores configurados"):
             motor.responder([{"role": "user", "content": "hola"}])
@@ -180,11 +262,99 @@ class MotorIATests(unittest.TestCase):
                 "LUNA_PROVIDERS": "groq,gemini",
             },
             solicitante=falso,
+            rendimiento=_RendimientoFalso(),
         )
         estados = motor.comprobar_salud()
         self.assertEqual(estados["groq"], (True, "activo"))
         self.assertEqual(estados["gemini"], (False, "HTTP 503"))
         self.assertTrue(all(item[1].get("cuerpo") is None for item in llamadas))
+
+    def test_imagen_solo_usa_proveedor_multimodal(self):
+        cuerpos = []
+
+        def falso(url, **kwargs):
+            if url.endswith("/models"):
+                return {"data": [{"id": "gemini-2.5-flash"}]}
+            cuerpos.append(kwargs["cuerpo"])
+            return {"choices": [{"message": {"content": "veo una bicicleta"}}]}
+
+        motor = MotorIA(
+            {
+                "GROQ_API_KEY": "solo-texto",
+                "GEMINI_API_KEY": "vision",
+                "LUNA_PROVIDERS": "groq,gemini",
+            },
+            solicitante=falso,
+            rendimiento=_RendimientoFalso(),
+        )
+        texto, proveedor, _ = motor.responder_imagen(
+            [{"role": "user", "content": "¿Qué ves?"}],
+            b"imagen",
+            "image/jpeg",
+        )
+        self.assertEqual(texto, "veo una bicicleta")
+        self.assertEqual(proveedor, "gemini")
+        contenido = cuerpos[0]["messages"][0]["content"]
+        self.assertEqual(contenido[0]["type"], "text")
+        self.assertTrue(contenido[1]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
+
+    def test_audio_se_transcribe_con_groq(self):
+        llamadas = []
+
+        def multipart(url, **kwargs):
+            llamadas.append((url, kwargs))
+            return {"text": "enciende la búsqueda"}
+
+        motor = MotorIA(
+            {"GROQ_API_KEY": "secreto"},
+            solicitante_multipart=multipart,
+            rendimiento=_RendimientoFalso(),
+        )
+        texto = motor.transcribir_audio(b"audio", "nota.ogg", "audio/ogg")
+        self.assertEqual(texto, "enciende la búsqueda")
+        self.assertIn("audio/transcriptions", llamadas[0][0])
+        self.assertEqual(llamadas[0][1]["campos"]["model"], "whisper-large-v3-turbo")
+
+
+class DocumentosTests(unittest.TestCase):
+    def test_extrae_txt(self):
+        self.assertEqual(
+            extraer_texto_documento(b"Hola Luna", "nota.txt", "text/plain"),
+            "Hola Luna",
+        )
+
+    def test_acepta_archivos_de_codigo_poliglota(self):
+        casos = {
+            "motor.rs": "fn main() {}",
+            "servidor.go": "package main",
+            "app.js": "const luna = true;",
+            "consulta.sql": "SELECT 1;",
+            "Main.kt": "fun main() {}",
+        }
+        for nombre, contenido in casos.items():
+            self.assertEqual(
+                extraer_texto_documento(contenido.encode(), nombre), contenido
+            )
+
+    def test_extrae_docx_sin_ejecutar_contenido(self):
+        xml = b"""<?xml version='1.0'?>
+        <w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>
+          <w:body><w:p><w:r><w:t>Primer texto</w:t></w:r></w:p>
+          <w:p><w:r><w:t>Segundo texto</w:t></w:r></w:p></w:body>
+        </w:document>"""
+        salida = io.BytesIO()
+        with zipfile.ZipFile(salida, "w") as archivo:
+            archivo.writestr("word/document.xml", xml)
+        texto = extraer_texto_documento(
+            salida.getvalue(),
+            "prueba.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        self.assertEqual(texto, "Primer texto\nSegundo texto")
+
+    def test_rechaza_formato_desconocido(self):
+        with self.assertRaisesRegex(Exception, "Formato no admitido"):
+            extraer_texto_documento(b"x", "programa.exe")
 
 
 class MemoriaYPropietarioTests(unittest.TestCase):
@@ -231,6 +401,43 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual(bot.get_me()["username"], "LunaBot")
         self.assertNotIn("123:secreto", str(llamadas[0][1]))
 
+    def test_comando_automejora_devuelve_estado_sin_llamar_modelo(self):
+        class MotorFalso:
+            def responder(self, _mensajes):
+                raise AssertionError("no debe llamar al modelo")
+
+        app = _aplicacion_falsa(MotorFalso())
+        app._estado_automejora = lambda: "🧠 siete agentes activos"
+        app.manejar(
+            {"chat": {"id": 1, "type": "private"}, "text": "/automejora"}
+        )
+        self.assertIn("siete agentes", app.telegram.enviados[-1][1])
+
+    def test_comando_reparar_fuerza_ciclo_seguro(self):
+        class MotorFalso:
+            pass
+
+        app = _aplicacion_falsa(MotorFalso())
+        app._forzar_automejora = lambda actualizar=False: (
+            "actualización comprobada" if actualizar else "reparación comprobada"
+        )
+        app.manejar(
+            {"chat": {"id": 1, "type": "private"}, "text": "/reparar"}
+        )
+        self.assertIn("reparación comprobada", app.telegram.enviados[-1][1])
+
+    def test_comando_lenguajes_no_llama_al_modelo(self):
+        class MotorFalso:
+            def responder(self, _mensajes):
+                raise AssertionError("no debe llamar al modelo")
+
+        app = _aplicacion_falsa(MotorFalso())
+        with patch("telegram_luna.resumen_poliglota", return_value="🌐 38 lenguajes"):
+            app.manejar(
+                {"chat": {"id": 1, "type": "private"}, "text": "/lenguajes"}
+            )
+        self.assertIn("lenguajes", app.telegram.enviados[-1][1])
+
     def test_no_llama_al_modelo_si_toda_busqueda_falla(self):
         class MotorFalso:
             def responder(self, _mensajes):
@@ -269,6 +476,30 @@ class TelegramTests(unittest.TestCase):
         self.assertIn("Titular comprobado", respuesta)
         self.assertIn("https://medio.test/noticia", respuesta)
         self.assertNotIn("No tengo acceso", respuesta)
+
+    def test_foto_llega_al_modelo_de_vision(self):
+        class MotorFalso:
+            def __init__(self):
+                self.recibido = None
+
+            def responder_imagen(self, mensajes, imagen, mime):
+                self.recibido = (mensajes, imagen, mime)
+                return "Es una bicicleta.", "gemini", "flash"
+
+        motor = MotorFalso()
+        app = _aplicacion_falsa(motor)
+        app.telegram.descargar_archivo = lambda _file_id: b"foto-real"
+        with patch("telegram_luna.cargar_memoria_privada", return_value=({}, [])):
+            app.manejar(
+                {
+                    "chat": {"id": 1, "type": "private"},
+                    "caption": "¿Qué hay en esta foto?",
+                    "photo": [{"file_id": "abc", "file_size": 100}],
+                }
+            )
+        self.assertEqual(motor.recibido[1:], (b"foto-real", "image/jpeg"))
+        self.assertIn("Es una bicicleta", app.telegram.enviados[-1][1])
+        self.assertIn("[Imagen]", app.memoria_chat.guardado[1])
 
 
 class VigilanciaTests(unittest.TestCase):

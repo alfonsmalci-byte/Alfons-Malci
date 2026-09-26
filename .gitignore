@@ -9,3 +9,13 @@ resultados/
 .luna_telegram.lock
 .memoria_telegram.tmp
 .memoria_telegram_offset.tmp
+estado_automejora.json
+eventos_automejora.jsonl*
+rendimiento_proveedores.json
+.luna_automejora.lock
+.luna_last_good*/
+.luna_backups/
+.luna_tmp/
+componentes_descargados/
+inventario_descargas_luna.json
+INFORME_INTEGRACION_LUNA.md

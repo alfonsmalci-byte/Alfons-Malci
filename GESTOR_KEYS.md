@@ -32,9 +32,11 @@ Validar una clave nueva antes de sustituir la anterior:
 cd ~/luna && python gestor_keys_luna.py rotar groq
 ```
 
-También se aceptan `gemini`, `openrouter`, `cerebras`, `deepseek`, `openai` y
-`telegram`. La nueva credencial se solicita de forma oculta, se valida y solo
-entonces se actualiza `.env`; si falla, se conserva la anterior.
+También se aceptan `gemini`, `openrouter`, `cerebras`, `deepseek`, `openai`,
+`telegram`, `tavily` y `brave`. La nueva credencial se solicita de forma oculta,
+se valida y solo entonces se actualiza `.env`; si falla, se conserva la
+anterior. Tavily se autentica mediante `/usage` sin consumir una búsqueda;
+Brave necesita una consulta mínima para comprobar su plan activo.
 
 ## Lo que se vigila
 

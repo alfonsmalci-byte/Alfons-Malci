@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from unittest.mock import patch
 
@@ -18,6 +19,56 @@ class LimpiezaConsultaTests(unittest.TestCase):
 
 
 class ProveedoresBusquedaTests(unittest.TestCase):
+    def test_tavily_usa_bearer_y_no_mete_la_clave_en_el_cuerpo(self):
+        cuerpo = json.dumps(
+            {
+                "results": [
+                    {
+                        "title": "Python",
+                        "url": "https://python.org",
+                        "content": "Official website",
+                    }
+                ]
+            }
+        )
+        with patch.dict(os.environ, {"TAVILY_API_KEY": "tavily-secreta"}), patch(
+            "luna.fetch", return_value=cuerpo
+        ) as fetch:
+            resultados = luna.tavily_search("Python", limit=1)
+        llamada = fetch.call_args
+        self.assertEqual(resultados[0]["source"], "tavily")
+        self.assertEqual(
+            llamada.kwargs["headers"]["Authorization"],
+            "Bearer tavily-secreta",
+        )
+        self.assertNotIn(b"tavily-secreta", llamada.kwargs["data"])
+
+    def test_brave_usa_su_cabecera_y_hace_busqueda_real(self):
+        cuerpo = json.dumps(
+            {
+                "web": {
+                    "results": [
+                        {
+                            "title": "Python",
+                            "url": "https://python.org",
+                            "description": "Official website",
+                        }
+                    ]
+                }
+            }
+        )
+        with patch.dict(
+            os.environ, {"BRAVE_SEARCH_API_KEY": "brave-secreta"}
+        ), patch("luna.fetch", return_value=cuerpo) as fetch:
+            resultados = luna.brave_search("Python", limit=1)
+        llamada = fetch.call_args
+        self.assertEqual(resultados[0]["source"], "brave")
+        self.assertEqual(
+            llamada.kwargs["headers"]["X-Subscription-Token"],
+            "brave-secreta",
+        )
+        self.assertNotIn("brave-secreta", llamada.args[0])
+
     def test_google_news_convierte_rss_en_resultados(self):
         cuerpo = """<?xml version="1.0" encoding="UTF-8"?>
         <rss><channel><item>
@@ -70,11 +121,80 @@ class ProveedoresBusquedaTests(unittest.TestCase):
             resultados = luna.wikipedia_search("Albania")
         self.assertEqual(resultados[0]["snippet"], "País de Europa")
 
+    def test_bing_convierte_rss_en_resultados(self):
+        cuerpo = """<?xml version="1.0"?><rss><channel><item>
+        <title>Reparar cadena de bicicleta</title>
+        <link>https://ejemplo.test/bicicleta</link>
+        <description>Guía práctica paso a paso</description>
+        </item></channel></rss>"""
+        with patch("luna.fetch", return_value=cuerpo):
+            resultados = luna.bing_search("reparar cadena bicicleta")
+        self.assertEqual(resultados[0]["source"], "bing")
+        self.assertIn("Guía práctica", resultados[0]["snippet"])
+
+    def test_consulta_general_no_usa_fuentes_de_noticias(self):
+        llamadas = []
+
+        def fuente(nombre, resultados=None):
+            def ejecutar(_q, _l):
+                llamadas.append(nombre)
+                return resultados or []
+
+            return ejecutar
+
+        proveedores = {
+            "google-news": fuente(
+                "google-news",
+                [{"title": "Ruido", "url": "https://ruido.test", "snippet": ""}],
+            ),
+            "gdelt": fuente("gdelt"),
+            "duckduckgo": fuente(
+                "duckduckgo",
+                [
+                    {
+                        "title": "Reparar una cadena de bicicleta",
+                        "url": "https://bici.test/guia",
+                        "snippet": "Pasos para arreglar la cadena rota",
+                    }
+                ],
+            ),
+            "wikipedia": fuente("wikipedia"),
+        }
+        resultados, _ = luna.search_web(
+            "cómo reparar una bicicleta con la cadena rota",
+            providers=proveedores,
+        )
+        self.assertEqual([item["title"] for item in resultados], ["Reparar una cadena de bicicleta"])
+        self.assertNotIn("google-news", llamadas)
+        self.assertNotIn("gdelt", llamadas)
+
+    def test_descarta_titular_que_no_menciona_el_tema(self):
+        proveedores = {
+            "google-news": lambda _q, _l: [
+                {
+                    "title": "Mercados europeos al alza",
+                    "url": "https://ruido.test/noticia",
+                    "snippet": "Economía internacional",
+                },
+                {
+                    "title": "Nuevo gobierno de Albania",
+                    "url": "https://relevante.test/noticia",
+                    "snippet": "Actualidad de Albania",
+                },
+            ]
+        }
+        resultados, _ = luna.search_web(
+            "noticias de Albania hoy",
+            providers=proveedores,
+        )
+        self.assertEqual(len(resultados), 1)
+        self.assertIn("Albania", resultados[0]["title"])
+
     def test_combina_fuentes_y_elimina_duplicados(self):
         repetido = {
-            "title": "Uno",
+            "title": "Albania uno",
             "url": "https://medio.test/a?utm_source=boletin",
-            "snippet": "A",
+            "snippet": "Albania A",
         }
         proveedores = {
             "google-news": lambda _q, _l: [],
@@ -86,9 +206,9 @@ class ProveedoresBusquedaTests(unittest.TestCase):
                     "source": "duckduckgo",
                 },
                 {
-                    "title": "Dos",
+                    "title": "Albania dos",
                     "url": "https://otro.test/b",
-                    "snippet": "B",
+                    "snippet": "Albania B",
                     "source": "duckduckgo",
                 },
             ],
@@ -98,7 +218,10 @@ class ProveedoresBusquedaTests(unittest.TestCase):
             "noticias de Albania hoy",
             providers=proveedores,
         )
-        self.assertEqual([r["title"] for r in resultados], ["Uno", "Dos"])
+        self.assertEqual(
+            [r["title"] for r in resultados],
+            ["Albania uno", "Albania dos"],
+        )
         self.assertTrue(any("wikipedia" in error for error in errores))
 
     def test_conserva_resultados_si_otra_fuente_falla(self):

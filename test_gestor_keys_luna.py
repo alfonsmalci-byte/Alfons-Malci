@@ -103,6 +103,25 @@ class ValidacionTests(unittest.TestCase):
         self.assertNotIn("gemini-secreta", peticion.full_url)
         self.assertEqual(peticion.get_header("X-goog-api-key"), "gemini-secreta")
 
+    def test_tavily_comprueba_uso_sin_consumir_busqueda(self):
+        peticion = gestor._peticion(
+            gestor.PROVEEDORES["tavily"], "tavily-secreta"
+        )
+        self.assertEqual(peticion.full_url, "https://api.tavily.com/usage")
+        self.assertEqual(
+            peticion.get_header("Authorization"), "Bearer tavily-secreta"
+        )
+
+    def test_brave_hace_busqueda_minima_con_cabecera_privada(self):
+        peticion = gestor._peticion(
+            gestor.PROVEEDORES["brave"], "brave-secreta"
+        )
+        self.assertNotIn("brave-secreta", peticion.full_url)
+        self.assertIn("count=1", peticion.full_url)
+        self.assertEqual(
+            peticion.get_header("X-subscription-token"), "brave-secreta"
+        )
+
     def test_validacion_paralela_incluye_faltantes(self):
         resultados = gestor.validar_todas(
             {"GROQ_API_KEY": "groq-secreta"},
@@ -110,6 +129,8 @@ class ValidacionTests(unittest.TestCase):
         )
         self.assertEqual(resultados["groq"].estado, "activa")
         self.assertEqual(resultados["gemini"].estado, "no_configurada")
+        self.assertEqual(resultados["tavily"].estado, "no_configurada")
+        self.assertEqual(resultados["brave"].estado, "no_configurada")
 
 
 class RotacionYVigilanciaTests(unittest.TestCase):

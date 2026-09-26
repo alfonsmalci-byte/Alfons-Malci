@@ -112,10 +112,28 @@ PROVEEDORES = {
         "gratuito; sirve como interfaz y avisos",
         "telegram",
     ),
+    "tavily": Proveedor(
+        "tavily",
+        "TAVILY_API_KEY",
+        "https://app.tavily.com/home",
+        "https://api.tavily.com/usage",
+        "búsqueda web; el nivel gratuito tiene créditos mensuales",
+    ),
+    "brave": Proveedor(
+        "brave",
+        "BRAVE_SEARCH_API_KEY",
+        "https://api-dashboard.search.brave.com/app/keys",
+        (
+            "https://api.search.brave.com/res/v1/web/search"
+            "?q=Python+programming+language&count=1&search_lang=en"
+        ),
+        "búsqueda web; requiere un plan activo",
+        "brave",
+    ),
 }
 
 ORDEN = tuple(PROVEEDORES)
-GRATIS_SIN_TARJETA = ("groq", "gemini", "openrouter", "telegram")
+GRATIS_SIN_TARJETA = ("groq", "gemini", "openrouter", "telegram", "tavily")
 
 
 def leer_env(ruta: Path = ENV_FILE) -> dict[str, str]:
@@ -225,6 +243,9 @@ def _peticion(proveedor: Proveedor, clave: str) -> urllib.request.Request:
         headers["x-goog-api-key"] = clave
     elif proveedor.autenticacion == "telegram":
         url = url.format(key=urllib.parse.quote(clave, safe=":"))
+    elif proveedor.autenticacion == "brave":
+        headers["Accept"] = "application/json"
+        headers["X-Subscription-Token"] = clave
     else:
         headers["Authorization"] = f"Bearer {clave}"
     return urllib.request.Request(url, headers=headers, method="GET")
@@ -276,7 +297,7 @@ def validar_todas(
 ) -> dict[str, Resultado]:
     resultados: dict[str, Resultado] = {}
     tareas = {}
-    with ThreadPoolExecutor(max_workers=7, thread_name_prefix="luna-keys") as executor:
+    with ThreadPoolExecutor(max_workers=len(ORDEN), thread_name_prefix="luna-keys") as executor:
         for nombre in ORDEN:
             proveedor = PROVEEDORES[nombre]
             clave = entorno.get(proveedor.variable, "").strip()

@@ -20,7 +20,15 @@ from sabiduria_luna import (
 
 
 USER_AGENT = "Mozilla/5.0 (Luna-Agent/1.0)"
-FUENTES_BUSQUEDA = ("google-news", "gdelt", "duckduckgo", "wikipedia")
+FUENTES_BUSQUEDA = (
+    "tavily",
+    "brave",
+    "duckduckgo",
+    "bing",
+    "wikipedia",
+    "google-news",
+    "gdelt",
+)
 PALABRAS_ACTUALIDAD = (
     "actual",
     "actualidad",
@@ -63,6 +71,34 @@ PALABRAS_RUIDO_NOTICIAS = {
     "ultima",
     "ultimas",
 }
+PALABRAS_RUIDO_BUSQUEDA = PALABRAS_RUIDO_NOTICIAS | {
+    "a",
+    "como",
+    "con",
+    "cual",
+    "cuales",
+    "donde",
+    "es",
+    "esta",
+    "este",
+    "esto",
+    "para",
+    "por",
+    "que",
+    "quien",
+    "se",
+    "sin",
+    "the",
+    "to",
+    "y",
+}
+try:
+    TIMEOUT_BUSQUEDA = max(
+        5,
+        min(20, int(os.getenv("LUNA_SEARCH_TIMEOUT", "10"))),
+    )
+except ValueError:
+    TIMEOUT_BUSQUEDA = 10
 
 
 def _sin_acentos(texto):
@@ -108,16 +144,18 @@ class DuckResultParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         cls = attrs.get("class", "")
-        if tag == "a" and "result__a" in cls:
+        if tag == "a" and ("result__a" in cls or "result-link" in cls):
             self._capture_title = True
             self._current = {"title": "", "url": attrs.get("href", ""), "snippet": ""}
-        elif tag in ("a", "div") and "result__snippet" in cls:
+        elif tag in ("a", "div", "td") and (
+            "result__snippet" in cls or "result-snippet" in cls
+        ):
             self._capture_snippet = True
 
     def handle_endtag(self, tag):
         if tag == "a" and self._capture_title:
             self._capture_title = False
-        elif tag in ("a", "div") and self._capture_snippet:
+        elif tag in ("a", "div", "td") and self._capture_snippet:
             self._capture_snippet = False
             if self._current.get("title"):
                 self.results.append(self._current.copy())
@@ -130,8 +168,12 @@ class DuckResultParser(HTMLParser):
             self._current["snippet"] += (" " if self._current["snippet"] else "") + data.strip()
 
 
-def fetch(url, timeout=20):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+def fetch(url, timeout=TIMEOUT_BUSQUEDA, headers=None, data=None):
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"User-Agent": USER_AGENT, **(headers or {})},
+    )
     with urllib.request.urlopen(req, timeout=timeout) as respuesta:
         return respuesta.read().decode("utf-8", errors="replace")
 
@@ -149,7 +191,7 @@ def wikipedia_search(query, limit=5):
         }
     )
     url = f"https://es.wikipedia.org/w/api.php?{params}"
-    data = json.loads(fetch(url))
+    data = json.loads(fetch(url, timeout=TIMEOUT_BUSQUEDA))
     out = []
     for item in data.get("query", {}).get("search", []):
         title = item.get("title", "")
@@ -179,7 +221,7 @@ def gdelt_search(query, limit=8):
         }
     )
     url = f"https://api.gdeltproject.org/api/v2/doc/doc?{params}"
-    data = json.loads(fetch(url, timeout=25))
+    data = json.loads(fetch(url, timeout=TIMEOUT_BUSQUEDA))
     out = []
     for item in data.get("articles", []):
         if not isinstance(item, dict):
@@ -214,7 +256,10 @@ def google_news_search(query, limit=8):
     params = urllib.parse.urlencode(
         {"q": consulta, "hl": "es", "gl": "ES", "ceid": "ES:es"}
     )
-    xml = fetch(f"https://news.google.com/rss/search?{params}", timeout=25)
+    xml = fetch(
+        f"https://news.google.com/rss/search?{params}",
+        timeout=TIMEOUT_BUSQUEDA,
+    )
     raiz = ET.fromstring(xml)
     out = []
     for item in raiz.findall(".//item"):
@@ -247,8 +292,17 @@ def duckduckgo_search(query, limit=5):
             "Content-Type": "application/x-www-form-urlencoded",
         },
     )
-    with urllib.request.urlopen(req, timeout=20) as respuesta:
-        html = respuesta.read().decode("utf-8", errors="replace")
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_BUSQUEDA) as respuesta:
+            html = respuesta.read().decode("utf-8", errors="replace")
+    except Exception:
+        # El endpoint ligero suele seguir disponible cuando el HTML principal
+        # limita solicitudes automatizadas.
+        params = urllib.parse.urlencode({"q": query})
+        html = fetch(
+            f"https://lite.duckduckgo.com/lite/?{params}",
+            timeout=TIMEOUT_BUSQUEDA,
+        )
     parser = DuckResultParser()
     parser.feed(html)
     out = []
@@ -270,6 +324,133 @@ def duckduckgo_search(query, limit=5):
                 }
             )
     return out
+
+
+def bing_search(query, limit=5):
+    """Usa el RSS público de Bing; no necesita una clave adicional."""
+    params = urllib.parse.urlencode({"q": query, "format": "rss", "setlang": "es"})
+    xml = fetch(f"https://www.bing.com/search?{params}", timeout=TIMEOUT_BUSQUEDA)
+    raiz = ET.fromstring(xml)
+    out = []
+    for item in raiz.findall(".//item"):
+        titulo = _texto_limpio(item.findtext("title"))
+        enlace = _url_publica(item.findtext("link"))
+        if not titulo or not enlace:
+            continue
+        out.append(
+            {
+                "title": titulo,
+                "url": enlace,
+                "snippet": _texto_limpio(item.findtext("description")),
+                "source": "bing",
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def brave_search(query, limit=5):
+    """Activa Brave Search si BRAVE_SEARCH_API_KEY ya existe en .env."""
+    clave = os.getenv("BRAVE_SEARCH_API_KEY", "").strip()
+    if not clave:
+        return []
+    params = urllib.parse.urlencode(
+        {"q": query, "count": max(1, min(int(limit), 20)), "search_lang": "es"}
+    )
+    cuerpo = fetch(
+        f"https://api.search.brave.com/res/v1/web/search?{params}",
+        timeout=TIMEOUT_BUSQUEDA,
+        headers={
+            "Accept": "application/json",
+            "X-Subscription-Token": clave,
+        },
+    )
+    data = json.loads(cuerpo)
+    out = []
+    for item in data.get("web", {}).get("results", []):
+        if not isinstance(item, dict):
+            continue
+        titulo = _texto_limpio(item.get("title"))
+        enlace = _url_publica(item.get("url"))
+        if titulo and enlace:
+            out.append(
+                {
+                    "title": titulo,
+                    "url": enlace,
+                    "snippet": _texto_limpio(item.get("description")),
+                    "source": "brave",
+                }
+            )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def tavily_search(query, limit=5):
+    """Activa Tavily si TAVILY_API_KEY ya existe en .env."""
+    clave = os.getenv("TAVILY_API_KEY", "").strip()
+    if not clave:
+        return []
+    payload = json.dumps(
+        {
+            "query": query,
+            "max_results": max(1, min(int(limit), 20)),
+            "search_depth": "basic",
+            "include_answer": False,
+            "include_raw_content": False,
+        }
+    ).encode("utf-8")
+    cuerpo = fetch(
+        "https://api.tavily.com/search",
+        timeout=TIMEOUT_BUSQUEDA,
+        headers={
+            "Authorization": f"Bearer {clave}",
+            "Content-Type": "application/json",
+        },
+        data=payload,
+    )
+    data = json.loads(cuerpo)
+    out = []
+    for item in data.get("results", []):
+        if not isinstance(item, dict):
+            continue
+        titulo = _texto_limpio(item.get("title"))
+        enlace = _url_publica(item.get("url"))
+        if titulo and enlace:
+            out.append(
+                {
+                    "title": titulo,
+                    "url": enlace,
+                    "snippet": _texto_limpio(item.get("content")),
+                    "source": "tavily",
+                }
+            )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _terminos_relevantes(query):
+    consulta = limpiar_consulta_noticias(query) if es_consulta_actual(query) else query
+    palabras = re.findall(r"[a-z0-9]+", _sin_acentos(consulta))
+    return {
+        palabra
+        for palabra in palabras
+        if len(palabra) >= 3 and palabra not in PALABRAS_RUIDO_BUSQUEDA
+    }
+
+
+def _puntuacion_relevancia(resultado, terminos):
+    if not terminos:
+        return 1
+    titulo = _sin_acentos(resultado.get("title", ""))
+    resto = _sin_acentos(
+        f"{resultado.get('snippet', '')} {resultado.get('url', '')}"
+    )
+    coincidencias_titulo = sum(1 for termino in terminos if termino in titulo)
+    coincidencias_resto = sum(1 for termino in terminos if termino in resto)
+    return coincidencias_titulo * 3 + coincidencias_resto
 
 
 def _clave_resultado(resultado):
@@ -296,14 +477,28 @@ def search_web(query, limit=8, providers=None):
         return [], ["La consulta está vacía"]
 
     proveedores = providers or {
+        "tavily": tavily_search,
+        "brave": brave_search,
+        "duckduckgo": duckduckgo_search,
+        "bing": bing_search,
+        "wikipedia": wikipedia_search,
         "google-news": google_news_search,
         "gdelt": gdelt_search,
-        "duckduckgo": duckduckgo_search,
-        "wikipedia": wikipedia_search,
     }
-    orden = list(FUENTES_BUSQUEDA)
-    if not es_consulta_actual(query):
-        orden = ["duckduckgo", "wikipedia", "google-news", "gdelt"]
+    if es_consulta_actual(query):
+        orden = [
+            "tavily",
+            "brave",
+            "google-news",
+            "gdelt",
+            "duckduckgo",
+            "bing",
+            "wikipedia",
+        ]
+    else:
+        # Una pregunta general no debe degradarse a titulares de prensa: esa
+        # era la causa de resultados irrelevantes como noticias de Albania.
+        orden = ["tavily", "brave", "duckduckgo", "bing", "wikipedia"]
     orden = [nombre for nombre in orden if nombre in proveedores]
     if not orden:
         return [], ["No hay fuentes de búsqueda configuradas"]
@@ -320,11 +515,27 @@ def search_web(query, limit=8, providers=None):
             try:
                 resultados = futuro.result()
                 por_fuente[nombre] = resultados if isinstance(resultados, list) else []
-                if not por_fuente[nombre]:
+                # Las fuentes opcionales sin clave no son un fallo.
+                if not por_fuente[nombre] and nombre not in {"tavily", "brave"}:
                     errors.append(f"{nombre} devolvió 0 resultados")
             except Exception as error:
                 por_fuente[nombre] = []
                 errors.append(f"{nombre} falló: {type(error).__name__}: {error}")
+
+    terminos = _terminos_relevantes(query)
+    for nombre in orden:
+        filtrados = []
+        for item in por_fuente.get(nombre, []):
+            if not isinstance(item, dict):
+                continue
+            puntuacion = _puntuacion_relevancia(item, terminos)
+            if terminos and puntuacion <= 0:
+                continue
+            copia = dict(item)
+            copia["_relevancia"] = puntuacion
+            filtrados.append(copia)
+        filtrados.sort(key=lambda item: item["_relevancia"], reverse=True)
+        por_fuente[nombre] = filtrados
 
     combinados = []
     vistos = set()
