@@ -17,12 +17,14 @@ SERVICIOS = ("luna-telegram", "luna-automejora")
 ARCHIVOS_NUCLEO = (
     "luna.py", "sabiduria_luna.py", "telegram_luna.py", "gestor_keys_luna.py",
     "automejora_luna.py", "poliglota_luna.py", "inventario_luna.py",
+    "viajes_luna.py",
 )
 PATRON_ENV = re.compile(r"^(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=")
 NOMBRES_CLAVE = (
     "GROQ_API_KEY", "GEMINI_API_KEY", "CEREBRAS_API_KEY",
     "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-    "TAVILY_API_KEY", "BRAVE_SEARCH_API_KEY", "TELEGRAM_TOKEN",
+    "TAVILY_API_KEY", "BRAVE_SEARCH_API_KEY", "SERPAPI_API_KEY",
+    "TELEGRAM_TOKEN",
 )
 
 

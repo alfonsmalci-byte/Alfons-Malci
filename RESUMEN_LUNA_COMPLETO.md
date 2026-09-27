@@ -12,8 +12,10 @@ La versión integrada incluye:
 - conexión privada con Telegram y vinculación al primer propietario;
 - seis proveedores de IA con cambio automático: Groq, Gemini, Cerebras,
   OpenRouter, DeepSeek y OpenAI;
-- nueve conexiones verificables desde el mismo puente: los seis proveedores,
-  Telegram, Tavily y Brave;
+- nueve conexiones base verificables desde el mismo puente: los seis
+  proveedores, Telegram, Tavily y Brave;
+- motor de vuelos estructurado con SerpAPI/Google Flights cuando existe
+  `SERPAPI_API_KEY`; exige fecha y no presenta enlaces genéricos como precio;
 - búsqueda real y relevante mediante DuckDuckGo, Bing RSS, Wikipedia, Google
   News y GDELT, más Tavily o Brave cuando ya existe su clave;
 - memoria local de conversación y memoria privada excluidas de GitHub;
@@ -75,6 +77,15 @@ luna-control logs
 `luna-control probar` compila el código, ejecuta todas las pruebas y comprueba
 Telegram y los proveedores sin pedir una respuesta de IA. Usa
 `luna-control probar --sin-red` para limitarse a pruebas locales.
+
+Para consultar un vuelo, incluye siempre la fecha:
+
+```text
+/busca primer vuelo de Albania a Milano Malpensa mañana
+```
+
+Si falta la fecha o SerpAPI no está configurada, Luna lo indica y no inventa
+horarios, precios ni una falsa “búsqueda completada”.
 
 ## Límite de Android
 

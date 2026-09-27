@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
-POLIGLOTA_VERSION = "6.0.0"
+POLIGLOTA_VERSION = "7.0.0"
 MAX_ARCHIVOS = 600
 MAX_BYTES_ARCHIVO = 2 * 1024 * 1024
 DIRECTORIOS_EXCLUIDOS = {

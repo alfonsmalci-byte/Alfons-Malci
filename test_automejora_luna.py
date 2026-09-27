@@ -41,6 +41,10 @@ def _crear_raiz(ruta: Path, version="4.0.0"):
             "LENGUAJES_SOPORTADOS = ('Python',)\n"
             "class MotorPoliglota:\n    pass\n"
         ),
+        "viajes_luna.py": (
+            "def buscar_vuelos_serpapi(*_a, **_k):\n    return {}\n"
+            "def responder_consulta_vuelo(*_a, **_k):\n    return ''\n"
+        ),
     }
     for nombre, contenido in contenidos.items():
         (ruta / nombre).write_text(contenido, encoding="utf-8")

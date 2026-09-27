@@ -32,6 +32,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from luna import brave_search, search_web, tavily_search
+from viajes_luna import comprobar_serpapi, es_consulta_vuelo, responder_consulta_vuelo
 from poliglota_luna import (
     EXTENSIONES_TEXTO_CODIGO,
     LENGUAJES_SOPORTADOS,
@@ -1092,32 +1093,14 @@ def dividir_texto(texto: str, limite: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
     return partes
 
 
-def necesita_web(texto: str) -> bool:
-    normalizado = "".join(
-        caracter
-        for caracter in unicodedata.normalize("NFKD", texto.lower())
-        if not unicodedata.combining(caracter)
-    )
-    if re.match(r"^/buscar(?:@\w+)?(?:\s|$)", normalizado):
-        return True
-    patrones = (
-        r"\b(?:busca|buscar|buscame|investiga|investigar)\b",
-        r"\b(?:internet|la web|online)\b",
-        r"\b(?:noticia|noticias|actualidad|ultima hora)\b",
-        r"\b(?:hoy|ahora mismo|actualizado|actualizada|reciente)\b",
-        r"\b(?:precio actual|clima|tiempo en)\b",
-    )
-    return any(re.search(patron, normalizado) for patron in patrones)
+COMANDO_BUSQUEDA_RE = re.compile(
+    r"^/(?:buscar|busca|web)(?:@\w+)?(?:\s|$)",
+    flags=re.IGNORECASE,
+)
 
 
-def buscar_contexto(texto: str) -> tuple[str, list[dict], list[str]]:
-    consulta = re.sub(
-        r"^/buscar(?:@\w+)?\s*",
-        "",
-        texto,
-        count=1,
-        flags=re.IGNORECASE,
-    ).strip()
+def limpiar_consulta_busqueda(texto: str) -> str:
+    consulta = COMANDO_BUSQUEDA_RE.sub("", texto, count=1).strip()
     consulta = re.sub(
         r"^(?:busca|buscar|búscame|buscame|investiga|investigar)"
         r"(?:\s+en\s+(?:internet|la\s+web|web|online))?\s*[:,;-]?\s*",
@@ -1126,6 +1109,30 @@ def buscar_contexto(texto: str) -> tuple[str, list[dict], list[str]]:
         count=1,
         flags=re.IGNORECASE,
     ).strip()
+    return consulta
+
+
+def necesita_web(texto: str) -> bool:
+    normalizado = "".join(
+        caracter
+        for caracter in unicodedata.normalize("NFKD", texto.lower())
+        if not unicodedata.combining(caracter)
+    )
+    if COMANDO_BUSQUEDA_RE.match(normalizado):
+        return True
+    patrones = (
+        r"\b(?:busca|buscar|buscame|investiga|investigar)\b",
+        r"\b(?:internet|la web|online)\b",
+        r"\b(?:noticia|noticias|actualidad|ultima hora)\b",
+        r"\b(?:hoy|ahora mismo|actualizado|actualizada|reciente)\b",
+        r"\b(?:precio actual|clima|tiempo en)\b",
+        r"\b(?:vuelo|vuelos|flight|flights|billete|billetes|bilieto|bilietos)\b",
+    )
+    return any(re.search(patron, normalizado) for patron in patrones)
+
+
+def buscar_contexto(texto: str) -> tuple[str, list[dict], list[str]]:
+    consulta = limpiar_consulta_busqueda(texto)
     if not consulta:
         return "", [], ["Falta escribir qué quieres buscar."]
     resultados, errores = search_web(consulta)
@@ -1156,7 +1163,7 @@ def mensaje_busqueda_fallida(consulta: str, errores: list[str]) -> str:
 
 
 def respuesta_resultados_directos(consulta: str, resultados: list[dict]) -> str:
-    lineas = [f"🔎 Búsqueda real completada para «{consulta}». Estos son los resultados:"]
+    lineas = [f"🔎 Resultados web encontrados para «{consulta}»:"]
     for indice, resultado in enumerate(resultados[:5], 1):
         titulo = str(resultado.get("title", "Resultado")).strip() or "Resultado"
         resumen = str(resultado.get("snippet", "")).strip()
@@ -1178,14 +1185,28 @@ def contradice_busqueda_real(respuesta: str) -> bool:
         "abre tu navegador",
         "crea un proyecto en google cloud",
         "obten una api key",
+        "no aparecen horarios ni precios",
+        "solo hay enlaces genericos",
     )
     return any(frase in normalizado for frase in frases)
+
+
+def limpiar_referencias_internas(respuesta: str) -> str:
+    """Impide que el modelo enseñe nombres internos como CONTEXTO WEB."""
+    limpio = re.sub(
+        r"\*{0,2}(?:CONTEXTO|EVIDENCIA)\s+WEB\*{0,2}",
+        "los resultados consultados",
+        str(respuesta),
+        flags=re.IGNORECASE,
+    )
+    return limpio.strip()
 
 
 AYUDA = """Luna está conectada.
 
 Escríbeme normalmente.
-/buscar tema — consulta Internet y responde con fuentes
+/busca tema — consulta Internet y responde con fuentes
+/buscar tema — alias de /busca
 /estado — muestra conexión y último proveedor
 /vigilar — comprueba ahora todas las APIs
 /diagnostico — prueba las 9 conexiones; no genera texto
@@ -1235,6 +1256,7 @@ class Aplicacion:
             "✅ Telegram conectado\n"
             f"🧠 Proveedores configurados: {configurados}\n"
             f"🔎 Buscadores conectados: {', '.join(buscadores) or 'ninguno'}\n"
+            f"✈️ Vuelos con precios: {'SerpAPI conectada' if self.motor.entorno.get('SERPAPI_API_KEY', '').strip() or self.motor.entorno.get('SERPAPI_KEY', '').strip() else 'SerpAPI no configurada'}\n"
             f"🔄 Último proveedor: {self.motor.ultimo_proveedor}\n"
             f"🤖 Último modelo: {self.motor.ultimo_modelo}\n"
             "📎 Fotos, voz y documentos: activos\n"
@@ -1344,7 +1366,7 @@ class Aplicacion:
         return EntradaUsuario(limpio, limpio, limpio)
 
     def _diagnostico(self) -> str:
-        lineas = ["🧪 Diagnóstico real de las 9 conexiones de Luna:"]
+        lineas = ["🧪 Diagnóstico real de Luna:"]
         estados = comprobar_nueve_conexiones(
             self.motor.entorno,
             self.motor,
@@ -1356,6 +1378,17 @@ class Aplicacion:
             activos += int(ok)
             lineas.append(f"{'✅' if ok else '❌'} {nombre}: {detalle}")
         lineas.append(f"{'✅' if activos == 9 else '⚠️'} Conexiones activas: {activos}/9")
+        clave_serpapi = (
+            self.motor.entorno.get("SERPAPI_API_KEY", "").strip()
+            or self.motor.entorno.get("SERPAPI_KEY", "").strip()
+        )
+        if clave_serpapi:
+            ok_vuelos, detalle_vuelos = comprobar_serpapi(clave_serpapi)
+            lineas.append(
+                f"{'✅' if ok_vuelos else '❌'} serpapi/vuelos: {detalle_vuelos}"
+            )
+        else:
+            lineas.append("➖ serpapi/vuelos: no configurada; no se pueden verificar precios")
         lineas.append("✅ Memoria local y soporte multimedia cargados")
         try:
             from automejora_luna import resumen_estado
@@ -1479,6 +1512,20 @@ class Aplicacion:
         pregunta = entrada.texto_modelo
         solicitud_web = bool(entrada.texto_web) and necesita_web(entrada.texto_web)
         if solicitud_web:
+            consulta_previa = limpiar_consulta_busqueda(entrada.texto_web)
+            if es_consulta_vuelo(consulta_previa):
+                respuesta_vuelo = responder_consulta_vuelo(
+                    consulta_previa,
+                    getattr(self.motor, "entorno", dict(os.environ)),
+                )
+                self.memoria_chat.agregar(
+                    chat_id,
+                    entrada.texto_memoria,
+                    respuesta_vuelo,
+                )
+                self.telegram.enviar(chat_id, respuesta_vuelo)
+                print("✅ Consulta de vuelo procesada por el motor estructurado")
+                return
             consulta, resultados_web, errores_web = buscar_contexto(entrada.texto_web)
             if not consulta:
                 self.telegram.enviar(chat_id, errores_web[0])
@@ -1500,13 +1547,14 @@ class Aplicacion:
         )
         if resultados_web:
             prompt += (
-                "\nLa búsqueda real ya fue ejecutada y sus resultados están en CONTEXTO WEB. "
+                "\nLa consulta web ya fue ejecutada y sus resultados están en EVIDENCIA WEB. "
                 "Responde usando únicamente esos datos para las afirmaciones actuales. Resume "
                 "los hallazgos, distingue lo incierto y no expliques cómo buscar, no pidas una "
-                "API key y no digas que careces de acceso a Internet."
+                "API key y no digas que careces de acceso a Internet. No menciones el nombre "
+                "interno EVIDENCIA WEB en la respuesta."
             )
         else:
-            prompt += " No afirmes que consultaste Internet porque CONTEXTO WEB está vacío."
+            prompt += " No afirmes que consultaste Internet porque no hay evidencia web."
         mensajes = [{"role": "system", "content": prompt}]
         mensajes.extend(self.memoria_chat.obtener(chat_id))
         mensajes.append({"role": "user", "content": pregunta})
@@ -1529,10 +1577,11 @@ class Aplicacion:
             return
 
         if resultados_web:
+            respuesta = limpiar_referencias_internas(respuesta)
             if contradice_busqueda_real(respuesta):
                 respuesta = respuesta_resultados_directos(pregunta, resultados_web)
             else:
-                respuesta = "🔎 Búsqueda real completada.\n\n" + respuesta
+                respuesta = "🔎 Resultados web actuales encontrados.\n\n" + respuesta
             fuentes = fuentes_texto(resultados_web)
             if fuentes:
                 respuesta += "\n\nFuentes consultadas:\n" + fuentes
@@ -1582,9 +1631,20 @@ def ejecutar(check_only: bool = False) -> int:
             raise LunaError(
                 f"Solo {len(activos)}/9 conexiones superaron la comprobación real"
             )
+        clave_serpapi = (
+            entorno.get("SERPAPI_API_KEY", "").strip()
+            or entorno.get("SERPAPI_KEY", "").strip()
+        )
+        if clave_serpapi:
+            ok_vuelos, detalle_vuelos = comprobar_serpapi(clave_serpapi)
+            print(f"{'✅' if ok_vuelos else '❌'} serpapi/vuelos: {detalle_vuelos}")
+            if not ok_vuelos:
+                raise LunaError("SerpAPI está configurada, pero no superó la comprobación")
+        else:
+            print("➖ serpapi/vuelos: no configurada (opcional; necesaria para horarios y precios)")
         print(
             "✅ COMPROBACIÓN TERMINADA: "
-            "9/9 conexiones activas (sin generar respuestas de IA)"
+            "9/9 conexiones base activas (sin generar respuestas de IA)"
         )
         return 0
 

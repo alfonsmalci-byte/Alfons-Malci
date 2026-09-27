@@ -122,6 +122,35 @@ class ValidacionTests(unittest.TestCase):
             peticion.get_header("X-subscription-token"), "brave-secreta"
         )
 
+    def test_serpapi_comprueba_cuenta_sin_hacer_busqueda(self):
+        peticion = gestor._peticion(
+            gestor.PROVEEDORES["serpapi"], "serpapi-secreta"
+        )
+        self.assertIn("serpapi.com/account.json", peticion.full_url)
+        self.assertIn("api_key=serpapi-secreta", peticion.full_url)
+        self.assertNotIn("search.json", peticion.full_url)
+
+    def test_serpapi_no_acepta_un_200_sin_cuenta_verificable(self):
+        resultado = gestor.validar_clave(
+            gestor.PROVEEDORES["serpapi"],
+            "serpapi-secreta",
+            abridor=lambda *_a, **_k: RespuestaFalsa(200, b'{}'),
+        )
+        self.assertEqual(resultado.estado, "rechazada")
+        self.assertFalse(resultado.utilizable)
+
+    def test_serpapi_acepta_cuenta_activa(self):
+        resultado = gestor.validar_clave(
+            gestor.PROVEEDORES["serpapi"],
+            "serpapi-secreta",
+            abridor=lambda *_a, **_k: RespuestaFalsa(
+                200,
+                b'{"account_status":"Active","total_searches_left":9}',
+            ),
+        )
+        self.assertEqual(resultado.estado, "activa")
+        self.assertTrue(resultado.utilizable)
+
     def test_validacion_paralela_incluye_faltantes(self):
         resultados = gestor.validar_todas(
             {"GROQ_API_KEY": "groq-secreta"},
@@ -131,6 +160,7 @@ class ValidacionTests(unittest.TestCase):
         self.assertEqual(resultados["gemini"].estado, "no_configurada")
         self.assertEqual(resultados["tavily"].estado, "no_configurada")
         self.assertEqual(resultados["brave"].estado, "no_configurada")
+        self.assertEqual(resultados["serpapi"].estado, "no_configurada")
 
 
 class RotacionYVigilanciaTests(unittest.TestCase):

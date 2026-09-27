@@ -33,10 +33,12 @@ cd ~/luna && python gestor_keys_luna.py rotar groq
 ```
 
 También se aceptan `gemini`, `openrouter`, `cerebras`, `deepseek`, `openai`,
-`telegram`, `tavily` y `brave`. La nueva credencial se solicita de forma oculta,
+`telegram`, `tavily`, `brave` y `serpapi`. La nueva credencial se solicita de forma oculta,
 se valida y solo entonces se actualiza `.env`; si falla, se conserva la
 anterior. Tavily se autentica mediante `/usage` sin consumir una búsqueda;
-Brave necesita una consulta mínima para comprobar su plan activo.
+Brave necesita una consulta mínima para comprobar su plan activo. SerpAPI se
+valida mediante su endpoint de cuenta, que no ejecuta una búsqueda. Luna usa
+SerpAPI solo para vuelos con ruta y fecha definidas.
 
 ## Lo que se vigila
 

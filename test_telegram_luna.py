@@ -23,6 +23,8 @@ from telegram_luna import (
     contradice_busqueda_real,
     extraer_texto_documento,
     guardar_offset,
+    limpiar_consulta_busqueda,
+    limpiar_referencias_internas,
     mensaje_busqueda_fallida,
     necesita_web,
     respuesta_resultados_directos,
@@ -101,6 +103,7 @@ class ConfiguracionTests(unittest.TestCase):
         self.assertTrue(necesita_web("Busca en Internet noticias de hoy"))
         self.assertTrue(necesita_web("Hazme una búsqueda online sobre Albania"))
         self.assertTrue(necesita_web("/buscar@LacKurbin_bot Albania"))
+        self.assertTrue(necesita_web("/busca un vuelo Tirana Malpensa"))
         self.assertFalse(necesita_web("Hola, ¿qué tal?"))
 
     def test_limpia_comando_antes_de_buscar(self):
@@ -111,6 +114,15 @@ class ConfiguracionTests(unittest.TestCase):
         self.assertEqual(consulta, "noticias de Albania hoy")
         buscar.assert_called_once_with("noticias de Albania hoy")
         self.assertEqual(resultados[0]["title"], "ok")
+
+    def test_limpia_el_alias_busca_usado_en_la_captura(self):
+        consulta = limpiar_consulta_busqueda(
+            "/busca el primer bilieto desde Albania a milano malpense"
+        )
+        self.assertEqual(
+            consulta,
+            "el primer bilieto desde Albania a milano malpense",
+        )
 
     def test_bloquea_falsa_negacion_de_internet(self):
         self.assertTrue(contradice_busqueda_real("No tengo acceso a Internet."))
@@ -127,8 +139,15 @@ class ConfiguracionTests(unittest.TestCase):
             "Albania",
             [{"title": "Titular", "snippet": "Resumen", "url": "https://x.test"}],
         )
-        self.assertIn("Búsqueda real completada", texto)
+        self.assertIn("Resultados web encontrados", texto)
         self.assertIn("Titular", texto)
+
+    def test_oculta_nombre_interno_del_contexto(self):
+        texto = limpiar_referencias_internas(
+            "En el bloque **CONTEXTO WEB** no aparece el precio."
+        )
+        self.assertNotIn("CONTEXTO WEB", texto)
+        self.assertIn("resultados consultados", texto)
 
 
 class MotorIATests(unittest.TestCase):
@@ -452,6 +471,29 @@ class TelegramTests(unittest.TestCase):
                 {"chat": {"id": 1, "type": "private"}, "text": "/buscar Albania"}
             )
         self.assertIn("no voy a inventar", app.telegram.enviados[-1][1])
+
+    def test_vuelo_usa_motor_estructurado_y_no_modelo(self):
+        class MotorFalso:
+            entorno = {"SERPAPI_API_KEY": "secreta"}
+
+            def responder(self, _mensajes):
+                raise AssertionError("un vuelo estructurado no debe llamar al modelo")
+
+        app = _aplicacion_falsa(MotorFalso())
+        respuesta = "✈️ Entendí TIA → MXP; falta la fecha exacta."
+        with patch(
+            "telegram_luna.responder_consulta_vuelo",
+            return_value=respuesta,
+        ) as resolver:
+            app.manejar(
+                {
+                    "chat": {"id": 1, "type": "private"},
+                    "text": "/busca primer bilieto Albania a Milano Malpense",
+                }
+            )
+        resolver.assert_called_once()
+        self.assertEqual(app.telegram.enviados[-1][1], respuesta)
+        self.assertEqual(app.memoria_chat.guardado[2], respuesta)
 
     def test_sustituye_negacion_del_modelo_por_resultados(self):
         class MotorFalso:

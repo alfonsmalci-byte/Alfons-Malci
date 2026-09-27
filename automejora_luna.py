@@ -33,7 +33,7 @@ from pathlib import Path
 from poliglota_luna import MotorPoliglota
 
 
-AUTOMEJORA_VERSION = "6.0.0"
+AUTOMEJORA_VERSION = "7.0.0"
 DEFAULT_REPO = "alfonsmalci-byte/Alfons-Malci"
 CRITICAL_CODE = (
     "luna.py",
@@ -42,6 +42,7 @@ CRITICAL_CODE = (
     "gestor_keys_luna.py",
     "automejora_luna.py",
     "poliglota_luna.py",
+    "viajes_luna.py",
 )
 TEST_FILES = (
     "test_luna_busqueda.py",
@@ -50,6 +51,7 @@ TEST_FILES = (
     "test_gestor_keys_luna.py",
     "test_automejora_luna.py",
     "test_poliglota_luna.py",
+    "test_viajes_luna.py",
 )
 PRIVATE_FILES = (
     ".env",
@@ -74,6 +76,7 @@ UPDATE_FILES = (
     "gestor_keys_luna.py",
     "automejora_luna.py",
     "poliglota_luna.py",
+    "viajes_luna.py",
     *TEST_FILES,
 )
 LOG_PATTERNS = (
@@ -797,6 +800,7 @@ class SistemaAutomejora:
             "telegram_luna.py": ("def responder_imagen", "def transcribir_audio", "/automejora"),
             "automejora_luna.py": ("class SistemaAutomejora", "sellar_version_buena"),
             "poliglota_luna.py": ("class MotorPoliglota", "LENGUAJES_SOPORTADOS"),
+            "viajes_luna.py": ("def buscar_vuelos_serpapi", "def responder_consulta_vuelo"),
         }
         for nombre, marcas in requeridos.items():
             ruta = candidato / nombre

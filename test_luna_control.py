@@ -14,6 +14,7 @@ class LunaControlTests(unittest.TestCase):
             ruta.write_text(
                 "GROQ_API_KEY=secreto-123\n"
                 "BRAVE_SEARCH_API_KEY=busqueda-privada\n"
+                "SERPAPI_API_KEY=vuelos-privada\n"
                 "OTRA=visible\n"
                 "export TELEGRAM_TOKEN='privado'\n",
                 encoding="utf-8",
@@ -21,7 +22,12 @@ class LunaControlTests(unittest.TestCase):
             resultado = luna_control.variables_configuradas(ruta)
         self.assertEqual(
             resultado,
-            ["GROQ_API_KEY", "BRAVE_SEARCH_API_KEY", "TELEGRAM_TOKEN"],
+            [
+                "GROQ_API_KEY",
+                "BRAVE_SEARCH_API_KEY",
+                "SERPAPI_API_KEY",
+                "TELEGRAM_TOKEN",
+            ],
         )
         self.assertNotIn("secreto-123", repr(resultado))
 

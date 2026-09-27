@@ -130,10 +130,25 @@ PROVEEDORES = {
         "búsqueda web; requiere un plan activo",
         "brave",
     ),
+    "serpapi": Proveedor(
+        "serpapi",
+        "SERPAPI_API_KEY",
+        "https://serpapi.com/manage-api-key",
+        "https://serpapi.com/account.json",
+        "Google Flights estructurado; la consulta de cuenta no gasta créditos",
+        "serpapi",
+    ),
 }
 
 ORDEN = tuple(PROVEEDORES)
-GRATIS_SIN_TARJETA = ("groq", "gemini", "openrouter", "telegram", "tavily")
+GRATIS_SIN_TARJETA = (
+    "groq",
+    "gemini",
+    "openrouter",
+    "telegram",
+    "tavily",
+    "serpapi",
+)
 
 
 def leer_env(ruta: Path = ENV_FILE) -> dict[str, str]:
@@ -246,6 +261,9 @@ def _peticion(proveedor: Proveedor, clave: str) -> urllib.request.Request:
     elif proveedor.autenticacion == "brave":
         headers["Accept"] = "application/json"
         headers["X-Subscription-Token"] = clave
+    elif proveedor.autenticacion == "serpapi":
+        separador = "&" if "?" in url else "?"
+        url += separador + urllib.parse.urlencode({"api_key": clave})
     else:
         headers["Authorization"] = f"Bearer {clave}"
     return urllib.request.Request(url, headers=headers, method="GET")
@@ -265,7 +283,7 @@ def validar_clave(
         peticion = _peticion(proveedor, clave)
         with abridor(peticion, timeout=timeout) as respuesta:
             codigo = int(getattr(respuesta, "status", respuesta.getcode()))
-            respuesta.read(512)
+            contenido = respuesta.read(8_192)
     except urllib.error.HTTPError as error:
         codigo = int(error.code)
     except (urllib.error.URLError, TimeoutError, OSError) as error:
@@ -277,7 +295,22 @@ def validar_clave(
             huella(clave),
         )
 
-    if 200 <= codigo < 300:
+    if 200 <= codigo < 300 and proveedor.autenticacion == "serpapi":
+        try:
+            cuenta = json.loads(contenido.decode("utf-8", errors="replace"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            cuenta = {}
+        estado_cuenta = str(cuenta.get("account_status", "")).strip().lower()
+        restantes = cuenta.get("total_searches_left", cuenta.get("plan_searches_left"))
+        if cuenta.get("error") or (not estado_cuenta and not isinstance(restantes, (int, float))):
+            estado, detalle = "rechazada", "cuenta no verificable"
+        elif estado_cuenta and estado_cuenta not in {"active", "activo"}:
+            estado, detalle = "rechazada", f"cuenta {estado_cuenta}"
+        elif isinstance(restantes, (int, float)) and restantes <= 0:
+            estado, detalle = "sin_saldo", "autenticada, sin búsquedas disponibles"
+        else:
+            estado, detalle = "activa", f"HTTP {codigo}; cuenta verificada"
+    elif 200 <= codigo < 300:
         estado, detalle = "activa", f"HTTP {codigo}"
     elif codigo == 429:
         estado, detalle = "limitada", "autenticada, límite temporal HTTP 429"

@@ -1,12 +1,13 @@
-# Luna Agent — versión integrada autónoma políglota 6.0
+# Luna Agent — versión integrada autónoma políglota 7.0
 
 Luna reúne en un solo bot para Termux el razonamiento, la búsqueda, la memoria,
 la rotación de modelos y el manejo de archivos de Telegram. El núcleo funciona
 con la biblioteca estándar; la lectura de PDF usa `pypdf` cuando está instalado.
 
-La versión 6 unifica las nueve conexiones reales: seis proveedores de IA,
-Telegram, Tavily y Brave. Corrige el nombre de la variable de Brave, usa la
-autenticación Bearer actual de Tavily y comprueba todo desde el mismo puente.
+La versión 7 conserva las nueve conexiones base: seis proveedores de IA,
+Telegram, Tavily y Brave. Añade un motor de vuelos estructurado mediante
+SerpAPI/Google Flights: no confunde enlaces genéricos con un precio verificado y
+no afirma que una búsqueda terminó si faltan la fecha o la fuente de vuelos.
 Consulta `RESUMEN_LUNA_COMPLETO.md` para ver la separación segura entre Termux,
 archivos históricos y nube.
 
@@ -130,7 +131,8 @@ El puente `telegram_luna.py`:
 - cambia al siguiente proveedor cuando uno falla;
 - guarda la conversación únicamente en `memoria_telegram.json` dentro del móvil;
 - vincula el bot al primer chat privado que le escriba y rechaza otros usuarios;
-- puede buscar en Internet con `/buscar tema` o cuando detecta una consulta actual;
+- puede buscar en Internet con `/busca tema` (`/buscar` sigue siendo alias) o
+  cuando detecta una consulta actual;
 - analiza fotos con Gemini, OpenRouter u OpenAI;
 - transcribe notas de voz con Groq Whisper;
 - lee PDF, DOCX, TXT, MD, CSV y JSON sin guardar el adjunto recibido.
@@ -138,13 +140,20 @@ El puente `telegram_luna.py`:
 Ejemplo de búsqueda real desde Telegram:
 
 ```text
-/buscar precio actual de Bitcoin
+/busca precio actual de Bitcoin
 ```
 
-Cuando hay resultados, Luna muestra `🔎 Búsqueda real completada`, resume solo
-el contexto recuperado y añade los enlaces. Si fallan todas las fuentes, informa
-del fallo y no deja que el modelo improvise datos ni instrucciones para crear
-claves de Bing o Google.
+En búsquedas generales Luna muestra los resultados encontrados y sus enlaces.
+En vuelos exige origen, destino y fecha exactos. Con `SERPAPI_API_KEY` consulta
+Google Flights y solo muestra horario y precio si la respuesta estructurada los
+contiene. Si falta la fecha, la clave o un dato verificable, lo dice claramente;
+no entrega enlaces genéricos como si fueran un vuelo concreto.
+
+Ejemplo de vuelo verificable:
+
+```text
+/busca primer vuelo de Albania a Milano Malpensa mañana
+```
 
 El orden inicial prioriza Groq GPT-OSS 120B, Gemini, Cerebras GPT-OSS 120B y el
 router gratuito de OpenRouter. Si todos fallan, puede usar DeepSeek u OpenAI;
@@ -157,7 +166,8 @@ Comprobar las nueve conexiones reales sin generar texto de IA:
 python telegram_luna.py --check
 ```
 
-La salida válida termina con `9/9 conexiones activas`. Esta comprobación hace
+La salida válida termina con `9/9 conexiones base activas`. Si SerpAPI está
+configurada, también comprueba su cuenta sin consumir una búsqueda. Esta comprobación hace
 una búsqueda mínima con Tavily y otra con Brave; el resto solo autentica y lista
 modelos.
 
