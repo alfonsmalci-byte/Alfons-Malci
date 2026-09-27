@@ -18,6 +18,7 @@ ARCHIVOS_NUCLEO = (
     "luna.py", "sabiduria_luna.py", "telegram_luna.py", "gestor_keys_luna.py",
     "automejora_luna.py", "poliglota_luna.py", "inventario_luna.py",
     "viajes_luna.py",
+    "nube_luna.py",
 )
 PATRON_ENV = re.compile(r"^(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=")
 NOMBRES_CLAVE = (
@@ -25,6 +26,7 @@ NOMBRES_CLAVE = (
     "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
     "TAVILY_API_KEY", "BRAVE_SEARCH_API_KEY", "SERPAPI_API_KEY",
     "TELEGRAM_TOKEN",
+    "LUNA_CLOUD_HOST", "LUNA_CLOUD_USER", "LUNA_CLOUD_PORT", "LUNA_CLOUD_KEY",
 )
 
 
@@ -127,6 +129,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("estado", help="muestra núcleo, configuración y servicios")
     pruebas = sub.add_parser("probar", help="compila, prueba y comprueba conexiones")
     pruebas.add_argument("--sin-red", action="store_true")
+    sub.add_parser(
+        "diagnostico-real",
+        help="genera una respuesta por IA y una búsqueda por API; consume cuota",
+    )
     sub.add_parser("iniciar", help="inicia los dos servicios")
     sub.add_parser("reiniciar", help="reinicia los dos servicios")
     sub.add_parser("parar", help="detiene los dos servicios")
@@ -141,6 +147,8 @@ def main(argv: list[str] | None = None) -> int:
         return mostrar_estado(raiz)
     if comando == "probar":
         return probar(raiz, sin_red=opciones.sin_red)
+    if comando == "diagnostico-real":
+        return ejecutar([sys.executable, "telegram_luna.py", "--check-real"], raiz)
     if comando in {"iniciar", "reiniciar", "parar"}:
         accion = {"iniciar": "up", "reiniciar": "restart", "parar": "down"}[comando]
         return controlar_servicios(accion)

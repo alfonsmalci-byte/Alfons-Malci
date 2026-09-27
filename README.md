@@ -1,11 +1,13 @@
-# Luna Agent — versión integrada autónoma políglota 7.0
+# Luna Agent — versión integrada verificable 8.0
 
 Luna reúne en un solo bot para Termux el razonamiento, la búsqueda, la memoria,
 la rotación de modelos y el manejo de archivos de Telegram. El núcleo funciona
 con la biblioteca estándar; la lectura de PDF usa `pypdf` cuando está instalado.
 
-La versión 7 conserva las nueve conexiones base: seis proveedores de IA,
-Telegram, Tavily y Brave. Añade un motor de vuelos estructurado mediante
+La versión 8 configura seis proveedores de IA, Telegram, Tavily y Brave, pero
+ya no llama “activas” a las claves únicamente por estar escritas en `.env`.
+Separa configuración, autenticación, respuesta completa y resultado exacto.
+Incluye un motor de vuelos estructurado mediante
 SerpAPI/Google Flights: no confunde enlaces genéricos con un precio verificado y
 no afirma que una búsqueda terminó si faltan la fecha o la fuente de vuelos.
 Consulta `RESUMEN_LUNA_COMPLETO.md` para ver la separación segura entre Termux,
@@ -13,7 +15,8 @@ archivos históricos y nube.
 
 ## Automejora segura y políglota
 
-La versión 4 incorpora siete agentes locales y ligeros:
+El mantenimiento ejecuta siete etapas locales y ligeras y guarda el resultado
+concreto de cada etapa:
 
 - **Centinela:** revisa código, JSON privados, permisos, espacio,
   bloqueo del proceso, registro y servicio.
@@ -160,16 +163,19 @@ router gratuito de OpenRouter. Si todos fallan, puede usar DeepSeek u OpenAI;
 esas dos APIs podrían consumir saldo según la cuenta. Se puede cambiar el orden
 con `LUNA_PROVIDERS` dentro del `.env`.
 
-Comprobar las nueve conexiones reales sin generar texto de IA:
+Comprobar autenticación sin generar texto ni gastar búsquedas:
 
 ```bash
 python telegram_luna.py --check
 ```
 
-La salida válida termina con `9/9 conexiones base activas`. Si SerpAPI está
-configurada, también comprueba su cuenta sin consumir una búsqueda. Esta comprobación hace
-una búsqueda mínima con Tavily y otra con Brave; el resto solo autentica y lista
-modelos.
+La salida distingue una clave configurada de una respuesta completa. Para una
+prueba externa explícita que genera una respuesta mínima por IA y una búsqueda
+por Tavily/Brave (consume cuota), usa:
+
+```bash
+python telegram_luna.py --check-real
+```
 
 Iniciar el bot:
 
@@ -208,17 +214,19 @@ el servicio, pero Android sí puede impedir todo reinicio después de pulsar
 **Forzar detención**; ninguna aplicación local puede avisar mientras está
 forzosamente detenida.
 
-El comando `/diagnostico` prueba desde Telegram las APIs y una búsqueda neutral
-sin gastar una generación. Nunca usa una noticia fija como prueba.
+El comando `/diagnostico` autentica sin gastar búsquedas y muestra la última
+búsqueda real registrada. `/nube` hace una conexión SSH real y comprueba el
+servicio remoto; no confunde la pantalla “Running” de Oracle con un bot activo.
 
 Comandos nuevos:
 
 ```text
-/automejora   estado de los siete agentes
+/automejora   último mantenimiento realmente ejecutado
 /reparar      revisión y reparación inmediata
 /actualizar   busca, prueba e instala solo una versión superior
 /rendimiento  orden aprendido de proveedores
 /lenguajes    estado real del motor políglota
+/nube         SSH y servicio real en Oracle
 ```
 
 Android sigue teniendo un límite físico: si se pulsa **Forzar detención** sobre

@@ -33,7 +33,7 @@ from pathlib import Path
 from poliglota_luna import MotorPoliglota
 
 
-AUTOMEJORA_VERSION = "7.0.0"
+AUTOMEJORA_VERSION = "8.0.0"
 DEFAULT_REPO = "alfonsmalci-byte/Alfons-Malci"
 CRITICAL_CODE = (
     "luna.py",
@@ -43,6 +43,9 @@ CRITICAL_CODE = (
     "automejora_luna.py",
     "poliglota_luna.py",
     "viajes_luna.py",
+    "nube_luna.py",
+    "inventario_luna.py",
+    "luna_control.py",
 )
 TEST_FILES = (
     "test_luna_busqueda.py",
@@ -52,6 +55,9 @@ TEST_FILES = (
     "test_automejora_luna.py",
     "test_poliglota_luna.py",
     "test_viajes_luna.py",
+    "test_nube_luna.py",
+    "test_inventario_luna.py",
+    "test_luna_control.py",
 )
 PRIVATE_FILES = (
     ".env",
@@ -60,16 +66,20 @@ PRIVATE_FILES = (
     "memoria_telegram.json",
     "memoria_telegram_offset.json",
     "rendimiento_proveedores.json",
+    "estado_busquedas.json",
 )
 JSON_PRIVATE_FILES = (
     "memoria_privada.json",
     "memoria_telegram.json",
     "memoria_telegram_offset.json",
     "rendimiento_proveedores.json",
+    "estado_busquedas.json",
 )
 UPDATE_FILES = (
     "README.md",
     "GESTOR_KEYS.md",
+    "RESUMEN_LUNA_COMPLETO.md",
+    "RESUMEN_ARCHIVOS_LUNA.md",
     "luna.py",
     "telegram_luna.py",
     "sabiduria_luna.py",
@@ -77,6 +87,11 @@ UPDATE_FILES = (
     "automejora_luna.py",
     "poliglota_luna.py",
     "viajes_luna.py",
+    "nube_luna.py",
+    "inventario_luna.py",
+    "luna_control.py",
+    "instalar_servicio_termux.sh",
+    "desplegar_luna_oracle.sh",
     *TEST_FILES,
 )
 LOG_PATTERNS = (
@@ -209,7 +224,7 @@ class NotificadorTelegram:
 
 
 class SistemaAutomejora:
-    """Coordina siete agentes con acciones limitadas y reversibles."""
+    """Coordina siete etapas de mantenimiento limitadas y reversibles."""
 
     def __init__(
         self,
@@ -801,6 +816,7 @@ class SistemaAutomejora:
             "automejora_luna.py": ("class SistemaAutomejora", "sellar_version_buena"),
             "poliglota_luna.py": ("class MotorPoliglota", "LENGUAJES_SOPORTADOS"),
             "viajes_luna.py": ("def buscar_vuelos_serpapi", "def responder_consulta_vuelo"),
+            "nube_luna.py": ("def comprobar_nube", "def formatear_estado_nube"),
         }
         for nombre, marcas in requeridos.items():
             ruta = candidato / nombre
@@ -950,11 +966,15 @@ class SistemaAutomejora:
                 "duracion_segundos": round(time.monotonic() - inicio, 2),
                 "ok": bool(verificado and sellado_ok and not pendientes),
                 "agentes": {
-                    "centinela": "activo",
-                    "diagnostico": "activo",
-                    "reparacion": "activo",
-                    "verificacion": "activo",
-                    "poliglota": "activo",
+                    "centinela": f"inspección ejecutada; {len(hallazgos)} hallazgo(s)",
+                    "diagnostico": f"{len(pendientes)} problema(s) pendiente(s)",
+                    "reparacion": (
+                        f"{sum(1 for item in reparaciones if item.ok)}/{len(reparaciones)} acción(es) correctas"
+                    ),
+                    "verificacion": (
+                        "pruebas superadas" if verificado else "pruebas FALLARON"
+                    ),
+                    "poliglota": detalle_verificacion,
                     "evolucion": detalle_evolucion,
                     "actualizacion": estado_update,
                 },
@@ -1007,7 +1027,7 @@ def resumen_estado(root: Path | str | None = None) -> str:
         return "⏳ Automejora instalada; todavía no terminó su primer ciclo."
     agentes = estado.get("agentes", {})
     lineas = [
-        "🧠 Automejora de Luna:",
+        "🧠 Mantenimiento comprobable de Luna:",
         f"{'✅' if estado.get('ok') else '⚠️'} Último ciclo: {estado.get('ultima_revision', 'sin fecha')}",
         f"🤖 Versión Luna: {estado.get('version_luna', 'desconocida')}",
         f"🔎 Centinela: {agentes.get('centinela', 'sin datos')}",

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
+import importlib.util
 import io
 import json
 import mimetypes
@@ -31,7 +32,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree
 
-from luna import brave_search, search_web, tavily_search
+from luna import (
+    PATRON_HORA,
+    PATRON_PRECIO,
+    analizar_intencion_busqueda,
+    brave_search,
+    evaluar_resultados_para_consulta,
+    search_web,
+    tavily_search,
+)
 from viajes_luna import comprobar_serpapi, es_consulta_vuelo, responder_consulta_vuelo
 from poliglota_luna import (
     EXTENSIONES_TEXTO_CODIGO,
@@ -40,6 +49,7 @@ from poliglota_luna import (
     resumen_poliglota,
 )
 from sabiduria_luna import cargar_memoria_privada, construir_prompt
+from nube_luna import comprobar_nube, formatear_estado_nube
 
 
 ROOT = Path(__file__).resolve().parent
@@ -49,6 +59,7 @@ CHAT_MEMORY_FILE = ROOT / "memoria_telegram.json"
 OFFSET_FILE = ROOT / "memoria_telegram_offset.json"
 LOCK_FILE = ROOT / ".luna_telegram.lock"
 PROVIDER_STATS_FILE = ROOT / "rendimiento_proveedores.json"
+SEARCH_STATS_FILE = ROOT / "estado_busquedas.json"
 MAX_USER_CHARS = 6_000
 MAX_HISTORY_MESSAGES = 16
 MAX_HISTORY_CHARS = 24_000
@@ -461,6 +472,7 @@ class RendimientoProveedores:
                     ),
                     "ultimo_error": "" if ok else str(error)[:100],
                     "ultima_respuesta": int(time.time()),
+                    **({"ultimo_exito": int(time.time())} if ok else {}),
                 }
             )
             # Conserva una ventana útil sin crecer indefinidamente.
@@ -741,7 +753,7 @@ class MotorIA:
                 )
                 if not isinstance(datos.get("data"), list):
                     raise LunaError("respuesta de modelos inesperada")
-                return True, "activo"
+                return True, f"autenticación OK; {len(datos['data'])} modelo(s) visibles"
             except HttpJsonError as error:
                 return False, f"HTTP {error.status}"
             except LunaError as error:
@@ -797,13 +809,32 @@ def comprobar_busquedas_reales(
     return estados
 
 
+def comprobar_busquedas_configuradas(
+    entorno: dict[str, str],
+) -> dict[str, tuple[bool, str]]:
+    """Informa de configuración sin gastar peticiones de búsqueda."""
+    return {
+        "tavily": (
+            (True, "clave configurada; búsqueda real no ejecutada en este diagnóstico")
+            if entorno.get("TAVILY_API_KEY", "").strip()
+            else (False, "no configurada")
+        ),
+        "brave": (
+            (True, "clave configurada; búsqueda real no ejecutada en este diagnóstico")
+            if entorno.get("BRAVE_SEARCH_API_KEY", "").strip()
+            else (False, "no configurada")
+        ),
+    }
+
+
 def comprobar_nueve_conexiones(
     entorno: dict[str, str],
     motor: MotorIA,
     *,
     telegram_ok: bool,
+    probar_busquedas: bool = False,
 ) -> dict[str, tuple[bool, str]]:
-    """Comprueba exactamente las seis IA, Telegram, Tavily y Brave."""
+    """Comprueba autenticación; la búsqueda real solo se hace si se solicita."""
     salud_ia = motor.comprobar_salud()
     estados: dict[str, tuple[bool, str]] = {}
     for nombre in ORDEN_POR_DEFECTO:
@@ -819,8 +850,47 @@ def comprobar_nueve_conexiones(
         if telegram_ok
         else (False, "no autenticado")
     )
-    estados.update(comprobar_busquedas_reales(entorno))
+    estados.update(
+        comprobar_busquedas_reales(entorno)
+        if probar_busquedas
+        else comprobar_busquedas_configuradas(entorno)
+    )
     return {nombre: estados[nombre] for nombre in ORDEN_CONEXIONES}
+
+
+def comprobar_respuestas_ia_reales(
+    motor: MotorIA,
+) -> dict[str, tuple[bool, str]]:
+    """Genera una respuesta mínima por proveedor; puede consumir cuota."""
+    estados: dict[str, tuple[bool, str]] = {}
+    mensajes = [
+        {"role": "system", "content": "Prueba técnica. Responde solo LUNA_OK."},
+        {"role": "user", "content": "LUNA_OK"},
+    ]
+    for nombre in motor.configurados:
+        proveedor = PROVEEDORES[nombre]
+        inicio = time.monotonic()
+        try:
+            modelos = motor._listar_modelos(proveedor)
+            if not modelos:
+                raise LunaError("ningún modelo disponible")
+            texto = motor._completar(proveedor, modelos[0], mensajes)
+            motor.rendimiento.registrar(nombre, True, time.monotonic() - inicio)
+            estados[nombre] = (
+                True,
+                f"respuesta completa recibida con {modelos[0]} ({len(texto)} caracteres)",
+            )
+        except HttpJsonError as error:
+            motor.rendimiento.registrar(
+                nombre, False, time.monotonic() - inicio, f"HTTP {error.status}"
+            )
+            estados[nombre] = (False, f"HTTP {error.status}")
+        except LunaError as error:
+            motor.rendimiento.registrar(
+                nombre, False, time.monotonic() - inicio, type(error).__name__
+            )
+            estados[nombre] = (False, str(error)[:120])
+    return estados
 
 
 class MemoriaChat:
@@ -1016,13 +1086,13 @@ class Vigilante:
             caidos = [nombre for nombre, (ok, _) in nuevos.items() if not ok]
             if caidos:
                 self._avisar(
-                    "⚠️ Vigilancia iniciada. No responden: "
+                    "⚠️ Vigilancia de autenticación iniciada. No autentican: "
                     + ", ".join(caidos)
-                    + ". Luna cambiará automáticamente a los que estén activos."
+                    + ". Luna intentará otro proveedor al responder."
                 )
             else:
                 self._avisar(
-                    f"🟢 Vigilancia activa: {len(activos)}/{len(nuevos)} proveedores responden."
+                    f"🟢 Autenticación: {len(activos)}/{len(nuevos)} APIs responden al catálogo de modelos. No se generó texto."
                 )
             return nuevos
 
@@ -1031,10 +1101,10 @@ class Vigilante:
             if anterior is None or anterior[0] == ok:
                 continue
             if ok:
-                self._avisar(f"✅ {nombre} volvió a funcionar.")
+                self._avisar(f"✅ {nombre} volvió a autenticar.")
             else:
                 self._avisar(
-                    f"⚠️ {nombre} dejó de responder ({detalle}). Luna usará otro proveedor."
+                    f"⚠️ {nombre} dejó de autenticar ({detalle}). Luna intentará otro proveedor."
                 )
         return nuevos
 
@@ -1043,7 +1113,7 @@ class Vigilante:
             estados = dict(self.estados)
         if not estados:
             return "⏳ Vigilancia: preparando primera comprobación"
-        lineas = ["🛡️ Vigilancia de APIs:"]
+        lineas = ["🛡️ Vigilancia de autenticación IA (no genera texto):"]
         for nombre in self.motor.configurados:
             ok, detalle = estados.get(nombre, (False, "sin comprobar"))
             lineas.append(f"{'✅' if ok else '❌'} {nombre}: {detalle}")
@@ -1136,7 +1206,45 @@ def buscar_contexto(texto: str) -> tuple[str, list[dict], list[str]]:
     if not consulta:
         return "", [], ["Falta escribir qué quieres buscar."]
     resultados, errores = search_web(consulta)
-    return consulta, resultados[:8], errores
+    evaluados, _ = evaluar_resultados_para_consulta(consulta, resultados[:8])
+    fuentes = sorted(
+        {
+            str(resultado.get("source", "")).strip()
+            for resultado in evaluados
+            if str(resultado.get("source", "")).strip()
+        }
+    )
+    estado = {
+        "timestamp": int(time.time()),
+        "consulta": consulta[:500],
+        "resultados": len(evaluados),
+        "resultados_exactos": sum(
+            bool((resultado.get("evidencia") or {}).get("exacta"))
+            for resultado in evaluados
+        ),
+        "fuentes_con_resultados": fuentes,
+        "errores": [str(error)[:180] for error in errores[:8]],
+    }
+    try:
+        temporal = SEARCH_STATS_FILE.with_name(f".{SEARCH_STATS_FILE.name}.tmp")
+        temporal.write_text(
+            json.dumps(estado, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.chmod(temporal, 0o600)
+        os.replace(temporal, SEARCH_STATS_FILE)
+        os.chmod(SEARCH_STATS_FILE, 0o600)
+    except OSError:
+        pass
+    return consulta, evaluados, errores
+
+
+def ultimo_estado_busqueda() -> dict:
+    try:
+        datos = json.loads(SEARCH_STATS_FILE.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return datos if isinstance(datos, dict) else {}
 
 
 def fuentes_texto(resultados: list[dict]) -> str:
@@ -1167,8 +1275,63 @@ def respuesta_resultados_directos(consulta: str, resultados: list[dict]) -> str:
     for indice, resultado in enumerate(resultados[:5], 1):
         titulo = str(resultado.get("title", "Resultado")).strip() or "Resultado"
         resumen = str(resultado.get("snippet", "")).strip()
+        url = str(resultado.get("url", "")).strip()
         lineas.append(f"\n{indice}. {titulo}" + (f"\n{resumen}" if resumen else ""))
+        if url:
+            lineas.append(url)
     return "\n".join(lineas)
+
+
+def mensaje_sin_datos_concretos(consulta: str, resultados: list[dict]) -> str:
+    intencion = analizar_intencion_busqueda(consulta)
+    faltan = []
+    if intencion["requiere_precio"]:
+        faltan.append("precio")
+    if intencion["requiere_hora"]:
+        faltan.append("horario")
+    requisito = " y ".join(faltan) or "los datos exactos solicitados"
+    lineas = [
+        "⚠️ La búsqueda sí se ejecutó, pero no encontró un resultado verificable "
+        f"con {requisito} para «{consulta}».",
+        "No voy a convertir páginas genéricas en una respuesta falsa.",
+    ]
+    cercanos = [
+        resultado
+        for resultado in resultados
+        if float((resultado.get("evidencia") or {}).get("relevancia", 0)) > 0
+    ][:3]
+    if cercanos:
+        lineas.append("\nEnlaces relacionados, marcados como NO exactos:")
+        for resultado in cercanos:
+            titulo = str(resultado.get("title") or "Resultado relacionado").strip()
+            url = str(resultado.get("url") or "").strip()
+            lineas.append(f"- {titulo}" + (f": {url}" if url else ""))
+    return "\n".join(lineas)
+
+
+def respuesta_cumple_datos_solicitados(consulta: str, respuesta: str) -> bool:
+    intencion = analizar_intencion_busqueda(consulta)
+    if not intencion["concreta"]:
+        return True
+    if intencion["requiere_precio"] and not PATRON_PRECIO.search(respuesta):
+        return False
+    if intencion["requiere_hora"] and not PATRON_HORA.search(respuesta):
+        return False
+    normalizado = "".join(
+        caracter
+        for caracter in unicodedata.normalize("NFKD", respuesta.lower())
+        if not unicodedata.combining(caracter)
+    )
+    frases_genericas = (
+        "abre un buscador",
+        "usa un buscador",
+        "introduce los datos",
+        "revisa los resultados",
+        "contacta directamente",
+        "puedes buscar en",
+        "pasos para encontrar",
+    )
+    return not any(frase in normalizado for frase in frases_genericas)
 
 
 def contradice_busqueda_real(respuesta: str) -> bool:
@@ -1209,9 +1372,10 @@ Escríbeme normalmente.
 /buscar tema — alias de /busca
 /estado — muestra conexión y último proveedor
 /vigilar — comprueba ahora todas las APIs
-/diagnostico — prueba las 9 conexiones; no genera texto
+/diagnostico — separa configuración, autenticación y uso real
 /conexiones — igual que /diagnostico
-/automejora — muestra los siete agentes automáticos
+/nube — comprueba SSH y el servicio de Oracle
+/automejora — muestra el último mantenimiento realmente ejecutado
 /reparar — fuerza un ciclo seguro de reparación
 /actualizar — busca una versión superior y la prueba antes de instalar
 /rendimiento — muestra el orden aprendido de proveedores
@@ -1252,17 +1416,44 @@ class Aplicacion:
             )
             if self.motor.entorno.get(variable, "").strip()
         ]
+        respuestas_reales = [
+            nombre
+            for nombre in self.motor.configurados
+            if int(
+                self.motor.rendimiento.datos.get(nombre, {}).get("ultimo_exito", 0)
+                or 0
+            )
+        ]
+        ultima_busqueda = ultimo_estado_busqueda()
+        busqueda_detalle = "ninguna búsqueda real registrada"
+        if ultima_busqueda:
+            busqueda_detalle = (
+                f"{ultima_busqueda.get('resultados', 0)} resultado(s), "
+                f"{ultima_busqueda.get('resultados_exactos', 0)} exacto(s)"
+            )
+        memoria, avisos_memoria = cargar_memoria_privada(ROOT / "memoria_privada.json")
+        memoria_estado = (
+            "error de lectura"
+            if avisos_memoria
+            else "cargada con datos"
+            if memoria
+            else "vacía o no creada"
+        )
+        vision = sorted(set(self.motor.configurados).intersection(PROVEEDORES_VISION))
         base = (
             "✅ Telegram conectado\n"
-            f"🧠 Proveedores configurados: {configurados}\n"
-            f"🔎 Buscadores conectados: {', '.join(buscadores) or 'ninguno'}\n"
-            f"✈️ Vuelos con precios: {'SerpAPI conectada' if self.motor.entorno.get('SERPAPI_API_KEY', '').strip() or self.motor.entorno.get('SERPAPI_KEY', '').strip() else 'SerpAPI no configurada'}\n"
+            f"🔧 IA configuradas: {configurados}\n"
+            f"✅ IA con al menos una respuesta completa registrada: {', '.join(respuestas_reales) or 'ninguna todavía'}\n"
+            f"🔧 Buscadores configurados: {', '.join(buscadores) or 'ninguno'}\n"
+            f"🔎 Última búsqueda real: {busqueda_detalle}\n"
+            f"✈️ Vuelos exactos: {'SerpAPI configurada (autenticación no comprobada aquí)' if self.motor.entorno.get('SERPAPI_API_KEY', '').strip() or self.motor.entorno.get('SERPAPI_KEY', '').strip() else 'NO disponibles: falta SerpAPI'}\n"
             f"🔄 Último proveedor: {self.motor.ultimo_proveedor}\n"
             f"🤖 Último modelo: {self.motor.ultimo_modelo}\n"
-            "📎 Fotos, voz y documentos: activos\n"
-            f"🌐 Programación políglota: {len(LENGUAJES_SOPORTADOS)} lenguajes reconocidos\n"
-            "🛠️ Automejora segura: activa\n"
-            "🔒 Memoria y claves: solo en Termux"
+            f"🖼️ Fotos: configuradas mediante {', '.join(vision) if vision else 'ningún proveedor de visión'}\n"
+            f"🎙️ Voz: {'configurada mediante Groq' if 'groq' in self.motor.configurados else 'no configurada'}\n"
+            f"📄 Documentos: texto/DOCX local; PDF {'disponible' if importlib.util.find_spec('pypdf') else 'sin pypdf'}\n"
+            f"🌐 Código: {len(LENGUAJES_SOPORTADOS)} formatos reconocidos; validación depende de herramientas instaladas\n"
+            f"🔒 Memoria privada: {memoria_estado}; claves en .env"
         )
         if self.vigilante:
             base += "\n\n" + self.vigilante.resumen()
@@ -1366,18 +1557,40 @@ class Aplicacion:
         return EntradaUsuario(limpio, limpio, limpio)
 
     def _diagnostico(self) -> str:
-        lineas = ["🧪 Diagnóstico real de Luna:"]
+        lineas = ["🧪 Diagnóstico de Luna (sin falsos 'activo'):"]
         estados = comprobar_nueve_conexiones(
             self.motor.entorno,
             self.motor,
             telegram_ok=True,
+            probar_busquedas=False,
         )
-        activos = 0
         for nombre in ORDEN_CONEXIONES:
             ok, detalle = estados[nombre]
-            activos += int(ok)
-            lineas.append(f"{'✅' if ok else '❌'} {nombre}: {detalle}")
-        lineas.append(f"{'✅' if activos == 9 else '⚠️'} Conexiones activas: {activos}/9")
+            if nombre in ORDEN_POR_DEFECTO:
+                icono = "🔑" if ok else "❌"
+            elif nombre == "telegram":
+                icono = "🔑" if ok else "❌"
+            else:
+                icono = "🔧" if ok else "➖"
+            lineas.append(f"{icono} {nombre}: {detalle}")
+        respuestas = [
+            nombre
+            for nombre in self.motor.configurados
+            if int(self.motor.rendimiento.datos.get(nombre, {}).get("ultimo_exito", 0) or 0)
+        ]
+        lineas.append(
+            "✅ Respuesta completa registrada: "
+            + (", ".join(respuestas) if respuestas else "ninguna todavía")
+        )
+        ultima_busqueda = ultimo_estado_busqueda()
+        if ultima_busqueda:
+            fuentes = ", ".join(ultima_busqueda.get("fuentes_con_resultados", [])) or "ninguna"
+            lineas.append(
+                f"✅ Última búsqueda ejecutada: {ultima_busqueda.get('resultados', 0)} resultado(s), "
+                f"{ultima_busqueda.get('resultados_exactos', 0)} exacto(s); fuentes: {fuentes}"
+            )
+        else:
+            lineas.append("⚪ Búsqueda completa: todavía no hay una ejecución registrada")
         clave_serpapi = (
             self.motor.entorno.get("SERPAPI_API_KEY", "").strip()
             or self.motor.entorno.get("SERPAPI_KEY", "").strip()
@@ -1385,20 +1598,37 @@ class Aplicacion:
         if clave_serpapi:
             ok_vuelos, detalle_vuelos = comprobar_serpapi(clave_serpapi)
             lineas.append(
-                f"{'✅' if ok_vuelos else '❌'} serpapi/vuelos: {detalle_vuelos}"
+                f"{'🔑' if ok_vuelos else '❌'} serpapi/vuelos: {detalle_vuelos}"
             )
         else:
-            lineas.append("➖ serpapi/vuelos: no configurada; no se pueden verificar precios")
-        lineas.append("✅ Memoria local y soporte multimedia cargados")
+            lineas.append("➖ serpapi/vuelos: NO CONFIGURADA; no se pueden afirmar horarios/precios")
+        memoria, avisos = cargar_memoria_privada(ROOT / "memoria_privada.json")
+        if avisos:
+            lineas.append("❌ Memoria privada: " + "; ".join(avisos[:2]))
+        elif memoria:
+            lineas.append("✅ Memoria privada: JSON legible y con datos")
+        else:
+            lineas.append("⚪ Memoria privada: legible, pero vacía o ausente")
+        vision = sorted(set(self.motor.configurados).intersection(PROVEEDORES_VISION))
+        lineas.append(
+            f"🔧 Fotos: {'configuradas con ' + ', '.join(vision) if vision else 'sin proveedor compatible'}; no se envió foto de prueba"
+        )
+        lineas.append(
+            f"🔧 Voz: {'configurada con Groq' if 'groq' in self.motor.configurados else 'sin Groq'}; no se envió audio de prueba"
+        )
+        lineas.append(
+            f"📄 PDF: {'pypdf instalado' if importlib.util.find_spec('pypdf') else 'pypdf NO instalado'}"
+        )
         try:
             from automejora_luna import resumen_estado
 
-            estado_auto = resumen_estado(ROOT).splitlines()
-            if estado_auto:
-                lineas.append(estado_auto[0])
+            lineas.extend(resumen_estado(ROOT).splitlines()[:3])
         except (ImportError, OSError):
             lineas.append("⚠️ Automejora: sin estado")
-        lineas.append(f"✅ Motor políglota: {len(LENGUAJES_SOPORTADOS)} lenguajes reconocidos")
+        lineas.append(
+            f"🔧 Motor políglota: reconoce {len(LENGUAJES_SOPORTADOS)} formatos; usa /lenguajes para validación local real"
+        )
+        lineas.append(formatear_estado_nube(comprobar_nube(self.motor.entorno)))
         return "\n".join(lineas)
 
     def _estado_automejora(self) -> str:
@@ -1472,6 +1702,13 @@ class Aplicacion:
             self.telegram.escribiendo(chat_id)
             self.telegram.enviar(chat_id, self._diagnostico())
             return
+        if comando == "/nube":
+            self.telegram.escribiendo(chat_id)
+            self.telegram.enviar(
+                chat_id,
+                formatear_estado_nube(comprobar_nube(self.motor.entorno)),
+            )
+            return
         if comando == "/automejora":
             self.telegram.enviar(chat_id, self._estado_automejora())
             return
@@ -1536,6 +1773,27 @@ class Aplicacion:
                     mensaje_busqueda_fallida(consulta, errores_web),
                 )
                 return
+            intencion = analizar_intencion_busqueda(consulta)
+            exactos = [
+                resultado
+                for resultado in resultados_web
+                if bool((resultado.get("evidencia") or {}).get("exacta"))
+            ]
+            if intencion["concreta"] and not exactos:
+                respuesta_sin_datos = mensaje_sin_datos_concretos(
+                    consulta,
+                    resultados_web,
+                )
+                self.memoria_chat.agregar(
+                    chat_id,
+                    entrada.texto_memoria,
+                    respuesta_sin_datos,
+                )
+                self.telegram.enviar(chat_id, respuesta_sin_datos)
+                print("⚠️ Búsqueda ejecutada sin evidencia concreta; no se llamó al modelo")
+                return
+            if exactos:
+                resultados_web = exactos
             if entrada.imagen is None and entrada.texto_modelo == entrada.texto_web:
                 pregunta = consulta
 
@@ -1578,7 +1836,10 @@ class Aplicacion:
 
         if resultados_web:
             respuesta = limpiar_referencias_internas(respuesta)
-            if contradice_busqueda_real(respuesta):
+            if contradice_busqueda_real(respuesta) or not respuesta_cumple_datos_solicitados(
+                pregunta,
+                respuesta,
+            ):
                 respuesta = respuesta_resultados_directos(pregunta, resultados_web)
             else:
                 respuesta = "🔎 Resultados web actuales encontrados.\n\n" + respuesta
@@ -1605,7 +1866,7 @@ def adquirir_bloqueo():
     return archivo
 
 
-def ejecutar(check_only: bool = False) -> int:
+def ejecutar(check_only: bool = False, check_real: bool = False) -> int:
     entorno = cargar_env()
     token = entorno.get("TELEGRAM_TOKEN", "").strip()
     telegram = TelegramBot(token)
@@ -1617,20 +1878,33 @@ def ejecutar(check_only: bool = False) -> int:
     print("✅ Proveedores configurados: " + (", ".join(motor.configurados) or "ninguno"))
     if not motor.configurados:
         raise LunaError("No hay ninguna clave de IA configurada")
-    if check_only:
+    if check_only or check_real:
         estados = comprobar_nueve_conexiones(
             entorno,
             motor,
             telegram_ok=True,
+            probar_busquedas=check_real,
         )
         for nombre in ORDEN_CONEXIONES:
             ok, detalle = estados[nombre]
-            print(f"{'✅' if ok else '❌'} {nombre}: {detalle}")
-        activos = [nombre for nombre, (ok, _) in estados.items() if ok]
-        if len(activos) != len(ORDEN_CONEXIONES):
-            raise LunaError(
-                f"Solo {len(activos)}/9 conexiones superaron la comprobación real"
-            )
+            icono = "✅" if ok else "❌"
+            print(f"{icono} {nombre}: {detalle}")
+        ia_ok = [
+            nombre for nombre in motor.configurados if estados.get(nombre, (False, ""))[0]
+        ]
+        if not ia_ok:
+            raise LunaError("ninguna IA configurada superó la autenticación")
+        if check_real:
+            print("🧪 Prueba REAL: generará una respuesta mínima por IA configurada.")
+            respuestas = comprobar_respuestas_ia_reales(motor)
+            for nombre in motor.configurados:
+                ok, detalle = respuestas.get(nombre, (False, "sin probar"))
+                print(f"{'✅' if ok else '❌'} {nombre}/chat: {detalle}")
+            fallos_reales = [nombre for nombre, (ok, _) in respuestas.items() if not ok]
+            if fallos_reales:
+                raise LunaError(
+                    "falló la respuesta completa de: " + ", ".join(fallos_reales)
+                )
         clave_serpapi = (
             entorno.get("SERPAPI_API_KEY", "").strip()
             or entorno.get("SERPAPI_KEY", "").strip()
@@ -1642,10 +1916,10 @@ def ejecutar(check_only: bool = False) -> int:
                 raise LunaError("SerpAPI está configurada, pero no superó la comprobación")
         else:
             print("➖ serpapi/vuelos: no configurada (opcional; necesaria para horarios y precios)")
-        print(
-            "✅ COMPROBACIÓN TERMINADA: "
-            "9/9 conexiones base activas (sin generar respuestas de IA)"
-        )
+        estado_nube = comprobar_nube(entorno)
+        print(formatear_estado_nube(estado_nube))
+        modo = "REAL (generación y búsquedas ejecutadas)" if check_real else "AUTENTICACIÓN (sin generación ni búsqueda de pago)"
+        print(f"✅ COMPROBACIÓN TERMINADA: {modo}")
         return 0
 
     bloqueo = adquirir_bloqueo()
@@ -1665,7 +1939,7 @@ def ejecutar(check_only: bool = False) -> int:
         try:
             telegram.enviar(
                 aplicacion.propietario.chat_id,
-                "♻️ Luna está activa como servicio. Si una API falla o se recupera, te avisaré aquí.",
+                "♻️ Luna está ejecutándose como servicio. La vigilancia comprueba autenticación; una respuesta completa solo se confirma cuando la recibo.",
             )
         except LunaError:
             pass
@@ -1737,11 +2011,16 @@ def main() -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="comprueba Telegram y las APIs sin generar texto",
+        help="comprueba autenticación sin generar texto ni gastar búsquedas",
+    )
+    parser.add_argument(
+        "--check-real",
+        action="store_true",
+        help="genera una respuesta por IA y una búsqueda por API; consume cuota",
     )
     opciones = parser.parse_args()
     try:
-        return ejecutar(check_only=opciones.check)
+        return ejecutar(check_only=opciones.check, check_real=opciones.check_real)
     except KeyboardInterrupt:
         print("\n👋 Luna Telegram detenida.")
         return 0

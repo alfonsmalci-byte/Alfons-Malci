@@ -92,6 +92,30 @@ PALABRAS_RUIDO_BUSQUEDA = PALABRAS_RUIDO_NOTICIAS | {
     "to",
     "y",
 }
+PALABRAS_CONSULTA_CONCRETA = (
+    "alquiler",
+    "alquilar",
+    "disponible",
+    "disponibilidad",
+    "en venta",
+    "horario",
+    "precio",
+    "cuanto cuesta",
+    "cuánto cuesta",
+    "que cuesta",
+    "qué cuesta",
+    "rent",
+    "rental",
+    "for sale",
+    "me qira",
+    "ne shitje",
+    "në shitje",
+)
+PATRON_PRECIO = re.compile(
+    r"(?i)(?:€|\$|£)\s*\d[\d.,]*|"
+    r"\b\d[\d.,]*\s*(?:€|\$|£|eur|euros?|usd|d[oó]lares?|all|lek[eë]?)(?=\s|[.,;:)]|$)"
+)
+PATRON_HORA = re.compile(r"\b(?:[01]?\d|2[0-3])[:.]\d{2}\b")
 try:
     TIMEOUT_BUSQUEDA = max(
         5,
@@ -451,6 +475,85 @@ def _puntuacion_relevancia(resultado, terminos):
     coincidencias_titulo = sum(1 for termino in terminos if termino in titulo)
     coincidencias_resto = sum(1 for termino in terminos if termino in resto)
     return coincidencias_titulo * 3 + coincidencias_resto
+
+
+def analizar_intencion_busqueda(query):
+    """Describe lo que debe contener una respuesta para llamarla concreta.
+
+    No intenta adivinar la respuesta. Solo evita que un enlace genérico o una
+    guía de pasos se presenten como si fueran el precio, horario o anuncio
+    solicitado por el usuario.
+    """
+    normalizado = _sin_acentos(query)
+    es_alquiler = bool(re.search(r"\b(?:alquiler|alquilar|rent|rental|qira)\b", normalizado))
+    es_venta = bool(
+        re.search(
+            r"\b(?:venta|vender|comprar|compro|sale|shitje|coche|carro|vehiculo|auto|makine|veture)\b",
+            normalizado,
+        )
+    ) and not es_alquiler
+    pide_hora = bool(re.search(r"\b(?:hora|horario|sale|salida|llega|llegada)\b", normalizado))
+    pide_precio = bool(
+        re.search(r"\b(?:precio|cuesta|coste|costo|barato|economico|presupuesto)\b", normalizado)
+        or re.search(r"(?:€|\$|£|\beur\b|\beuro\b|\blek\b|\ball\b)", normalizado)
+    )
+    concreta = any(frase in normalizado for frase in map(_sin_acentos, PALABRAS_CONSULTA_CONCRETA))
+    concreta = concreta or pide_hora or pide_precio or es_alquiler or es_venta
+    return {
+        "concreta": concreta,
+        "tipo": "alquiler" if es_alquiler else "venta" if es_venta else "general",
+        "requiere_precio": pide_precio or es_alquiler or es_venta,
+        "requiere_hora": pide_hora,
+        "terminos": sorted(_terminos_relevantes(query)),
+    }
+
+
+def evaluar_resultado_para_consulta(query, resultado):
+    """Añade señales comprobables sin convertir coincidencias en un éxito."""
+    intencion = analizar_intencion_busqueda(query)
+    texto = " ".join(
+        str(resultado.get(campo, ""))
+        for campo in ("title", "snippet", "url")
+    )
+    normalizado = _sin_acentos(texto)
+    terminos = intencion["terminos"]
+    coinciden = [termino for termino in terminos if termino in normalizado]
+    cobertura = len(coinciden) / max(1, len(terminos))
+    tiene_precio = bool(PATRON_PRECIO.search(texto))
+    tiene_hora = bool(PATRON_HORA.search(texto))
+    datos_requeridos = True
+    faltan = []
+    if intencion["requiere_precio"] and not tiene_precio:
+        datos_requeridos = False
+        faltan.append("precio")
+    if intencion["requiere_hora"] and not tiene_hora:
+        datos_requeridos = False
+        faltan.append("horario")
+    # Para una consulta concreta exigimos además una coincidencia razonable con
+    # sus términos. Un único "Albania" no convierte una portada genérica en un
+    # anuncio de Laç/Kurbin.
+    relevante = cobertura >= (0.34 if len(terminos) >= 3 else 0.5)
+    exacto = relevante and (datos_requeridos or not intencion["concreta"])
+    copia = dict(resultado)
+    copia["evidencia"] = {
+        "exacta": bool(exacto),
+        "relevancia": round(cobertura, 2),
+        "coinciden": coinciden[:10],
+        "faltan": faltan,
+        "tiene_precio": tiene_precio,
+        "tiene_hora": tiene_hora,
+    }
+    return copia
+
+
+def evaluar_resultados_para_consulta(query, resultados):
+    evaluados = [
+        evaluar_resultado_para_consulta(query, resultado)
+        for resultado in resultados
+        if isinstance(resultado, dict)
+    ]
+    exactos = [resultado for resultado in evaluados if resultado["evidencia"]["exacta"]]
+    return evaluados, exactos
 
 
 def _clave_resultado(resultado):

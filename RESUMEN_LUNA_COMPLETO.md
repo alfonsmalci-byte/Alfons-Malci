@@ -12,8 +12,8 @@ La versión integrada incluye:
 - conexión privada con Telegram y vinculación al primer propietario;
 - seis proveedores de IA con cambio automático: Groq, Gemini, Cerebras,
   OpenRouter, DeepSeek y OpenAI;
-- nueve conexiones base verificables desde el mismo puente: los seis
-  proveedores, Telegram, Tavily y Brave;
+- estado separado de las seis IA, Telegram, Tavily y Brave: configuración,
+  autenticación, respuesta completa y resultado exacto;
 - motor de vuelos estructurado con SerpAPI/Google Flights cuando existe
   `SERPAPI_API_KEY`; exige fecha y no presenta enlaces genéricos como precio;
 - búsqueda real y relevante mediante DuckDuckGo, Bing RSS, Wikipedia, Google
@@ -21,8 +21,8 @@ La versión integrada incluye:
 - memoria local de conversación y memoria privada excluidas de GitHub;
 - lectura de fotos, audios, PDF, DOCX, texto, Markdown, CSV, JSON y código;
 - reconocimiento y validación segura de más de 30 lenguajes de programación;
-- siete agentes de mantenimiento: centinela, diagnóstico, reparación,
-  verificación, políglota, evolución y actualización;
+- siete etapas de mantenimiento con resultado guardado: inspección,
+  diagnóstico, reparación, verificación, políglota, evolución y actualización;
 - servicios `luna-telegram` y `luna-automejora`, con reinicio por runit y
   arranque mediante Termux:Boot cuando Android lo permite;
 - vigilancia de APIs y avisos por Telegram si un proveedor falla o se recupera;
@@ -68,6 +68,7 @@ Otros comandos:
 
 ```bash
 luna-control probar
+luna-control diagnostico-real
 luna-control claves
 luna-control inventario
 luna-control reiniciar
@@ -95,9 +96,11 @@ Para reducirlo, Termux debe tener batería **Sin restricciones**, Termux:Boot de
 abrirse una vez y no debe usarse **Forzar detención**. Ningún programa local
 puede enviar una alerta después de que Android haya matado todos sus procesos.
 
-## Separación con la nube
+## Oracle Cloud
 
-Los componentes del servidor permanecen separados. En el servidor se usa
-`/opt/luna` y `systemd`; en el móvil, `~/luna` y `runit`. El puente remoto puede
-guardarse para revisión, pero este archivo instala únicamente la edición segura
-para Termux.
+`desplegar_luna_oracle.sh` instala el código desde GitHub, copia `.env` solo por
+SSH cuando se usa `--copiar-claves`, crea un servicio `systemd` y lo verifica.
+La copia local se detiene solo después de que Oracle devuelve `active`, para no
+provocar HTTP 409 en Telegram. La captura de Oracle confirma que la instancia
+existe y está encendida; todavía se necesitan la IP pública y la clave SSH para
+demostrar la conexión y completar el despliegue.

@@ -366,12 +366,16 @@ def _icono(resultado: Resultado) -> str:
 
 
 def texto_estado(resultados: dict[str, Resultado]) -> str:
-    lineas = ["🔐 Estado real de las claves de Luna:"]
+    lineas = ["🔐 Autenticación de claves (no demuestra una respuesta completa):"]
     for nombre in ORDEN:
         resultado = resultados[nombre]
         extra = f" · id {resultado.huella}" if resultado.huella else ""
+        etiqueta = {
+            "activa": "autenticada",
+            "limitada": "autenticada_con_límite",
+        }.get(resultado.estado, resultado.estado)
         lineas.append(
-            f"{_icono(resultado)} {nombre}: {resultado.estado} ({resultado.detalle}){extra}"
+            f"{_icono(resultado)} {nombre}: {etiqueta} ({resultado.detalle}){extra}"
         )
     return "\n".join(lineas)
 
@@ -480,15 +484,15 @@ def cambios_estado(
     if not anteriores:
         activas = sum(resultado.utilizable for resultado in actuales.values())
         configuradas = sum(resultado.configurada for resultado in actuales.values())
-        return [f"🔐 Vigilancia de claves iniciada: {activas}/{configuradas} utilizables."]
+        return [f"🔐 Vigilancia de claves iniciada: {activas}/{configuradas} autenticadas."]
     for nombre, actual in actuales.items():
         anterior = str(anteriores.get(nombre, {}).get("estado", ""))
         antes_ok = anterior in ESTADOS_AUTENTICADOS
         ahora_ok = actual.utilizable
         if antes_ok and not ahora_ok:
-            avisos.append(f"⚠️ La clave de {nombre} dejó de funcionar: {actual.estado}.")
+            avisos.append(f"⚠️ La clave de {nombre} dejó de autenticar: {actual.estado}.")
         elif anterior and not antes_ok and ahora_ok:
-            avisos.append(f"✅ La clave de {nombre} volvió a funcionar.")
+            avisos.append(f"✅ La clave de {nombre} volvió a autenticar.")
     return avisos
 
 

@@ -45,6 +45,12 @@ def _crear_raiz(ruta: Path, version="4.0.0"):
             "def buscar_vuelos_serpapi(*_a, **_k):\n    return {}\n"
             "def responder_consulta_vuelo(*_a, **_k):\n    return ''\n"
         ),
+        "nube_luna.py": (
+            "def comprobar_nube(*_a, **_k):\n    return {}\n"
+            "def formatear_estado_nube(*_a, **_k):\n    return ''\n"
+        ),
+        "inventario_luna.py": "ACTIVO = True\n",
+        "luna_control.py": "ACTIVO = True\n",
     }
     for nombre, contenido in contenidos.items():
         (ruta / nombre).write_text(contenido, encoding="utf-8")

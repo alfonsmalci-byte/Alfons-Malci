@@ -28,6 +28,7 @@ from telegram_luna import (
     mensaje_busqueda_fallida,
     necesita_web,
     respuesta_resultados_directos,
+    respuesta_cumple_datos_solicitados,
     _puntuacion_modelo,
 )
 
@@ -141,6 +142,21 @@ class ConfiguracionTests(unittest.TestCase):
         )
         self.assertIn("Resultados web encontrados", texto)
         self.assertIn("Titular", texto)
+        self.assertIn("https://x.test", texto)
+
+    def test_rechaza_respuesta_generica_para_peticion_de_precio(self):
+        self.assertFalse(
+            respuesta_cumple_datos_solicitados(
+                "coche en venta en Laç por 1000 euros",
+                "Pasos para encontrarlo: abre un buscador y revisa los resultados.",
+            )
+        )
+        self.assertTrue(
+            respuesta_cumple_datos_solicitados(
+                "coche en venta en Laç por 1000 euros",
+                "Golf 2005 en Laç: precio 1.000 €. Fuente comprobada.",
+            )
+        )
 
     def test_oculta_nombre_interno_del_contexto(self):
         texto = limpiar_referencias_internas(
@@ -179,6 +195,7 @@ class MotorIATests(unittest.TestCase):
                 entorno,
                 motor,
                 telegram_ok=True,
+                probar_busquedas=True,
             )
         self.assertEqual(len(estados), 9)
         self.assertTrue(all(ok for ok, _detalle in estados.values()))
@@ -197,6 +214,31 @@ class MotorIATests(unittest.TestCase):
         self.assertTrue(estados["brave"][0])
         tavily.assert_called_once()
         brave.assert_called_once()
+
+    def test_diagnostico_normal_no_gasta_busquedas(self):
+        entorno = {
+            "GROQ_API_KEY": "a",
+            "TELEGRAM_TOKEN": "1:t",
+            "TAVILY_API_KEY": "g",
+            "BRAVE_SEARCH_API_KEY": "h",
+        }
+        motor = MotorIA(entorno, rendimiento=_RendimientoFalso())
+        with patch.object(
+            motor,
+            "comprobar_salud",
+            return_value={"groq": (True, "autenticación OK")},
+        ), patch("telegram_luna.tavily_search") as tavily, patch(
+            "telegram_luna.brave_search"
+        ) as brave:
+            estados = comprobar_nueve_conexiones(
+                entorno,
+                motor,
+                telegram_ok=True,
+            )
+        tavily.assert_not_called()
+        brave.assert_not_called()
+        self.assertIn("no ejecutada", estados["tavily"][1])
+        self.assertIn("no ejecutada", estados["brave"][1])
 
     def test_modelo_estable_mas_nuevo_recibe_mayor_puntuacion(self):
         self.assertGreater(
@@ -284,7 +326,10 @@ class MotorIATests(unittest.TestCase):
             rendimiento=_RendimientoFalso(),
         )
         estados = motor.comprobar_salud()
-        self.assertEqual(estados["groq"], (True, "activo"))
+        self.assertEqual(
+            estados["groq"],
+            (True, "autenticación OK; 1 modelo(s) visibles"),
+        )
         self.assertEqual(estados["gemini"], (False, "HTTP 503"))
         self.assertTrue(all(item[1].get("cuerpo") is None for item in llamadas))
 
@@ -409,6 +454,41 @@ class MemoriaYPropietarioTests(unittest.TestCase):
 
 
 class TelegramTests(unittest.TestCase):
+    def test_busqueda_concreta_sin_precio_no_llama_modelo(self):
+        class MotorFalso:
+            def responder(self, _mensajes):
+                raise AssertionError("no debe inventar una respuesta sin precio")
+
+        resultado = {
+            "title": "Portal general de coches en Albania",
+            "url": "https://coches.test/albania",
+            "snippet": "Compra y venta de vehículos",
+            "source": "brave",
+            "evidencia": {
+                "exacta": False,
+                "relevancia": 0.4,
+                "faltan": ["precio"],
+            },
+        }
+        app = _aplicacion_falsa(MotorFalso())
+        with patch(
+            "telegram_luna.buscar_contexto",
+            return_value=(
+                "coche en venta en Laç Kurbin por 1000 euros",
+                [resultado],
+                [],
+            ),
+        ):
+            app.manejar(
+                {
+                    "chat": {"id": 1, "type": "private"},
+                    "text": "/busca coche en venta en Laç Kurbin por 1000 euros",
+                }
+            )
+        respuesta = app.telegram.enviados[-1][1]
+        self.assertIn("no encontró un resultado verificable", respuesta)
+        self.assertIn("NO exactos", respuesta)
+
     def test_get_me_no_expone_token_en_cuerpo(self):
         llamadas = []
 
@@ -574,9 +654,9 @@ class VigilanciaTests(unittest.TestCase):
         vigilante.revisar()
         vigilante.revisar()
         textos = [texto for _, texto in telegram.enviados]
-        self.assertTrue(any("Vigilancia activa" in texto for texto in textos))
-        self.assertTrue(any("dejó de responder" in texto for texto in textos))
-        self.assertTrue(any("volvió a funcionar" in texto for texto in textos))
+        self.assertTrue(any("Autenticación" in texto for texto in textos))
+        self.assertTrue(any("dejó de autenticar" in texto for texto in textos))
+        self.assertTrue(any("volvió a autenticar" in texto for texto in textos))
 
 
 if __name__ == "__main__":

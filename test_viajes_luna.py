@@ -5,15 +5,25 @@ import viajes_luna
 
 
 class AnalisisVueloTests(unittest.TestCase):
-    def test_detecta_ruta_de_la_captura_sin_fecha(self):
+    def test_detecta_ruta_de_la_captura_y_asume_manana_por_primer_vuelo(self):
         analisis = viajes_luna.analizar_consulta_vuelo(
             "/busca el primer bilieto desde Albania a milano malpense dime el horario y precio",
             hoy=date(2026, 9, 26),
         )
         self.assertTrue(analisis["es_vuelo"])
         self.assertEqual((analisis["origen"], analisis["destino"]), ("TIA", "MXP"))
-        self.assertIn("fecha", analisis["faltan"])
+        self.assertEqual(analisis["fecha"], "2026-09-27")
+        self.assertTrue(analisis["fecha_inferida"])
+        self.assertNotIn("fecha", analisis["faltan"])
         self.assertEqual(analisis["ordenar"], "salida")
+
+    def test_reconoce_prishtina_kosovo_como_prn(self):
+        analisis = viajes_luna.analizar_consulta_vuelo(
+            "primer vuelo desde Prishtina Kosovo a Milano Malpensa",
+            hoy=date(2026, 9, 26),
+        )
+        self.assertEqual((analisis["origen"], analisis["destino"]), ("PRN", "MXP"))
+        self.assertEqual(analisis["fecha"], "2026-09-27")
 
     def test_convierte_manana_a_fecha_de_tirana(self):
         analisis = viajes_luna.analizar_consulta_vuelo(
@@ -102,9 +112,9 @@ class SerpApiVueloTests(unittest.TestCase):
         self.assertNotIn("CONTEXTO WEB", texto)
         self.assertNotIn("secreta", texto)
 
-    def test_sin_fecha_pide_fecha_y_no_llama_api(self):
+    def test_sin_fecha_y_sin_intencion_de_proximo_pide_fecha(self):
         texto = viajes_luna.responder_consulta_vuelo(
-            "primer bilieto Albania a Milano Malpense",
+            "bilieto Albania a Milano Malpense",
             {"SERPAPI_API_KEY": "secreta"},
         )
         self.assertIn("falta la fecha exacta", texto)

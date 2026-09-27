@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
-NUCLEO_VERSION = "7.0.0"
+NUCLEO_VERSION = "8.0.0"
 MAX_MEMORIA_BYTES = 64 * 1024
 MAX_BLOQUE_CARACTERES = 12_000
 

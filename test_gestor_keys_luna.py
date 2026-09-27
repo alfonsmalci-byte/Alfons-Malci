@@ -195,14 +195,14 @@ class RotacionYVigilanciaTests(unittest.TestCase):
         avisos = gestor.cambios_estado(
             {"groq": {"estado": "activa"}}, actual_caida
         )
-        self.assertIn("dejó de funcionar", avisos[0])
+        self.assertIn("dejó de autenticar", avisos[0])
         actual_vuelta = {
             "groq": gestor.Resultado("groq", "activa", "HTTP 200", True)
         }
         avisos = gestor.cambios_estado(
             {"groq": {"estado": "rechazada"}}, actual_vuelta
         )
-        self.assertIn("volvió a funcionar", avisos[0])
+        self.assertIn("volvió a autenticar", avisos[0])
 
 
 if __name__ == "__main__":

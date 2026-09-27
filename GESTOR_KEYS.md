@@ -45,7 +45,7 @@ SerpAPI solo para vuelos con ruta y fecha definidas.
 El servicio `luna-keys` ejecuta `gestor_keys_luna.py servicio` y comprueba
 periódicamente la autenticación sin generar
 texto ni gastar una respuesta del modelo. Envía un aviso al chat privado de
-Telegram si una clave deja de funcionar o vuelve a funcionar. El intervalo por
+Telegram si una clave deja de autenticar o vuelve a autenticar. El intervalo por
 defecto es de seis horas y se puede cambiar en `.env`:
 
 ```text

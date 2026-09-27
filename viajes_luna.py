@@ -24,6 +24,7 @@ USER_AGENT = "Luna-Travel/1.0"
 TIMEZONE = "Europe/Tirane"
 FLIGHT_API_URL = "https://serpapi.com/search.json"
 ACCOUNT_API_URL = "https://serpapi.com/account.json"
+VIAJES_VERSION = "8.0.0"
 
 
 class ViajesError(RuntimeError):
@@ -60,6 +61,9 @@ AIRPORT_ALIASES = {
     "athens": "ATH",
     "ath": "ATH",
     "pristina": "PRN",
+    "prishtina": "PRN",
+    "kosovo": "PRN",
+    "kosova": "PRN",
     "prn": "PRN",
     "skopje": "SKP",
     "skp": "SKP",
@@ -193,6 +197,16 @@ def analizar_consulta_vuelo(texto: str, *, hoy: date | None = None) -> dict:
     codigos = list(ruta_dirigida) if ruta_dirigida else _extraer_aeropuertos(texto)
     fecha, error_fecha = _extraer_fecha(texto, hoy)
     normalizado = _sin_acentos(texto)
+    fecha_inferida = False
+    if not fecha and not error_fecha and re.search(
+        r"\b(?:primer|primero|proximo|proxima|siguiente|mas\s+temprano)\b",
+        normalizado,
+    ):
+        # Una petición de "primer/próximo vuelo" ya expresa intención temporal.
+        # Usamos mañana como única suposición explícita para evitar devolver al
+        # usuario la misma pregunta que acaba de hacer.
+        fecha = (hoy + timedelta(days=1)).isoformat()
+        fecha_inferida = True
     if re.search(r"\b(?:barato|barata|economico|economica|menor precio)\b", normalizado):
         ordenar = "precio"
     elif re.search(r"\b(?:primer|primero|temprano|antes)\b", normalizado):
@@ -211,6 +225,7 @@ def analizar_consulta_vuelo(texto: str, *, hoy: date | None = None) -> dict:
         "origen": codigos[0] if codigos else "",
         "destino": codigos[1] if len(codigos) > 1 else "",
         "fecha": fecha,
+        "fecha_inferida": fecha_inferida,
         "error_fecha": error_fecha,
         "ordenar": ordenar,
         "faltan": faltan,
@@ -416,6 +431,8 @@ def formatear_vuelos(resultado: dict) -> str:
         f"Ruta: {consulta['origen']} → {consulta['destino']}",
         f"Fecha: {fecha} · Solo ida · 1 adulto · EUR",
     ]
+    if consulta.get("fecha_inferida"):
+        lineas.append("Suposición explícita: interpreté «primer/próximo vuelo» como mañana.")
     for indice, opcion in enumerate(resultado["opciones"], 1):
         aerolinea = ", ".join(opcion["aerolineas"]) or "Aerolínea no indicada"
         numero = ", ".join(opcion["vuelos"])

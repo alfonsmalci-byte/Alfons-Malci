@@ -12,6 +12,7 @@ resultados/
 estado_automejora.json
 eventos_automejora.jsonl*
 rendimiento_proveedores.json
+estado_busquedas.json
 .luna_automejora.lock
 .luna_last_good*/
 .luna_backups/

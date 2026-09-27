@@ -19,6 +19,36 @@ class LimpiezaConsultaTests(unittest.TestCase):
 
 
 class ProveedoresBusquedaTests(unittest.TestCase):
+    def test_no_llama_exacto_a_un_portal_generico_sin_precio(self):
+        evaluados, exactos = luna.evaluar_resultados_para_consulta(
+            "coche en venta en Laç Kurbin por unos 1000 euros",
+            [
+                {
+                    "title": "Coches usados en Albania",
+                    "url": "https://ejemplo.test/coches",
+                    "snippet": "Compra y vende vehículos en toda Albania",
+                    "source": "prueba",
+                }
+            ],
+        )
+        self.assertEqual(exactos, [])
+        self.assertIn("precio", evaluados[0]["evidencia"]["faltan"])
+
+    def test_acepta_anuncio_relevante_con_precio_visible(self):
+        _, exactos = luna.evaluar_resultados_para_consulta(
+            "coche en venta en Laç Kurbin por unos 1000 euros",
+            [
+                {
+                    "title": "Volkswagen Golf en venta en Laç",
+                    "url": "https://ejemplo.test/golf-lac",
+                    "snippet": "Kurbin, Albania · Precio 1.000 € · disponible",
+                    "source": "prueba",
+                }
+            ],
+        )
+        self.assertEqual(len(exactos), 1)
+        self.assertTrue(exactos[0]["evidencia"]["tiene_precio"])
+
     def test_tavily_usa_bearer_y_no_mete_la_clave_en_el_cuerpo(self):
         cuerpo = json.dumps(
             {

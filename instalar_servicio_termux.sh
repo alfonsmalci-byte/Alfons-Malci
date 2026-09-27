@@ -22,7 +22,7 @@ if [ ! -f "$REPO_DIR/.env" ]; then
 fi
 chmod 600 "$REPO_DIR/.env"
 
-echo "📦 Preparando servicio permanente de Luna..."
+echo "📦 Preparando servicio local supervisado de Luna..."
 pkg install termux-services -y
 
 mkdir -p "$SERVICE_DIR/log" "$SERVICE_LOG_DIR" "$BOOT_DIR"
@@ -101,8 +101,8 @@ estado="$(sv status "$SERVICIO" 2>&1 || true)"
 echo "$estado"
 case "$estado" in
   run:*)
-    echo "✅ Luna quedó funcionando como servicio permanente."
-    echo "✅ Puedes cerrar la ventana de Termux normalmente."
+    echo "✅ El proceso de Luna quedó en estado run bajo Termux Services."
+    echo "⚠️ Cerrar la ventana normalmente suele conservarlo; Android aún puede matar Termux."
     echo "📄 Registro: $SERVICE_LOG_DIR/current"
     ;;
   *)
